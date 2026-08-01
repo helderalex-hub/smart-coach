@@ -1,130 +1,151 @@
-# Arquitetura do Sistema Aetheris Motor Fisiológico & Prescritivo de Treinamento
+# Aetheris — Arquitetura do Sistema e Motor de Treinamento Adaptativo
 
-> **Princípio Fundamental:** O objetivo do algoritmo não é descobrir se o atleta pode treinar, mas sim determinar qual é o maior estímulo que ele consegue absorver hoje sem comprometer a adaptação futura.
+O **Aetheris** é uma plataforma de prescrição de treinamento adaptativo para atletas de corrida, fundamentada em fisiologia do exercício, análise de carga externa/interna e variabilidade da frequência cardíaca (VFC). 
+
+Este documento apresenta a arquitetura atualizada, detalhando a separação de responsabilidades entre a experiência simplificada do atleta, o motor matemático de prontidão e os módulos de telemetria e prescrição.
 
 ---
 
 ## 1. Visão Geral da Arquitetura
 
-O **Aetheris** é um motor fisiológico de decisão e recomendação de treino baseado em evidências e dados biométricos. A arquitetura segue uma separação estrita de responsabilidades em três camadas fundamentais:
+O Aetheris adota a arquitetura **Clean UI & Isolated Domain Engine**, separando rigorosamente as decisões da interface do usuário das regras fisiológicas puras.
 
 ```
-                  ┌─────────────────────────────────────────┐
-                  │          ENTRADA DE DADOS E BIOMARCADORES│
-                  └────────────────────┬────────────────────┘
-                                       │
-                                       ▼
- ┌───────────────────────────────────────────────────────────────────────────┐
- │                            MOTOR AETHERIS                                 │
- │                                                                           │
- │  ┌───────────────────────┐  ┌───────────────────────┐  ┌───────────────┐ │
- │  │ 1. MODELO DE CARGA     │  │ 2. RESPOSTA BIOLÓGICA │  │ 3. DECISÃO    │ │
- │  │    (ATL, CTL, ACWR,   │  │    (HRV, Sono, FC,    │  │    CONVERGENTE│ │
- │  │     TRIMP, EWMA)      │  │     Subjetivo, BB)    │  │    (Prescrição)│ │
- │  └───────────────────────┘  └───────────────────────┘  └───────────────┘ │
- └─────────────────────────────────────┬─────────────────────────────────────┘
-                                       │
-                                       ▼
-                  ┌─────────────────────────────────────────┐
-                  │    PRESCRIÇÃO E INTERFAZE DO COACH     │
-                  └─────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        AETHERIS FRONTEND (REACT)                       │
+├──────────────┬───────────────┬────────────────┬───────────────┬────────┤
+│  Briefing    │  Disponibi-   │  Prescrição    │ Telemetria &  │ Audit  │
+│  do Atleta   │  lidade Hoje  │  Ajustada      │ Análise FIT   │ Modal  │
+└──────┬───────┴───────┬───────┴────────┬───────┴───────┬───────┴───┬────┘
+       │               │                │               │           │
+       ▼               ▼                ▼               ▼           ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                    COACH ENGINE (MOTOR PURO TYPESCRIPT)                │
+├────────────────────────────────────────────────────────────────────────┤
+│ • Readiness Engine (Prontidão Fisiológica Diária)                      │
+│ • Carga Acumulada EWMA (ATL / CTL / ACWR)                              │
+│ • Análise de Microciclo (Monotonia & Strain de Foster)                 │
+│ • Prescrição Adaptativa & Explicabilidade Fisiológica                  │
+│ • Exportador de Treinos Estruturados para Garmin Connect               │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Princípios de Design Fisiológico
+## 2. Princípio do Design de Interface: Briefing em Primeira Camada
 
-### Princípio 1 — Separar Carga, Recuperação e Desempenho
-O sistema trata de forma estritamente independente as três perguntas centrais do treinamento:
-1. **Quanto o atleta treinou? (Carga Externa):** Medido via TRIMP, distância, intensidade, Monotonia e Deformação (*Strain*). Mede apenas o estresse aplicado.
-2. **Como o organismo respondeu? (Carga Interna & Biomarcadores):** Medido via VFC/HRV relativa à linha de base individual de 21 dias, qualidade/quantidade de sono, variação da FC de repouso, Body Battery, percepção subjetiva e dor muscular.
-3. **O que deve ser feito hoje? (Decisão Prescritiva):** Decisão emergente resultante da convergência entre a carga acumulada e a assimilação biológica.
+A interface do Aetheris foi projetada para evitar a sobrecarga de informações numéricas ou jargões laboratoriais para o atleta no dia a dia, reservando dados complexos para modais de auditoria técnica.
 
-### Princípio 2 — O Modelo Biológico dos Dois Tanques (Aptidão vs. Fadiga)
-- **Tanque de Aptidão — CTL (*Chronic Training Load*):** Representa a aptidão crônica acumulada em uma janela móvel de 28 a 42 dias. Cresce lentamente e não flutua bruscamente em um único dia.
-- **Tanque de Fadiga — ATL (*Acute Training Load*):** Representa a fadiga aguda gerada pelas sessões recentes (janela de 7 dias).
-- **Modelo de Decaimento EWMA (*Exponentially Weighted Moving Average*):** A fadiga e a aptidão não utilizam cortes lineares ou porcentagens arbitrárias fixas. Utiliza-se cálculo EWMA com fator de suavização $\alpha = 0,20$:
-  $$\text{ATL}_{\text{hoje}} = \text{ATL}_{\text{ontem}} + (\text{Carga}_{\text{hoje}} - \text{ATL}_{\text{ontem}}) \times \alpha$$
-  Em dias de descanso, o decaimento exponencial natural é calculado por:
-  $$\text{ATL}_{\text{descanso}} = \text{ATL}_{\text{bruta}} \times (1 - \alpha)^{\text{dias}}$$
-- **Unidade de Medida:** A carga é expressa em unidades de **Training Load** (e não "pontos"), refletindo a natureza contínua do volume e intensidade acumulados.
-- **Razão ACWR (*Acute-to-Chronic Workload Ratio*):**
+### 2.1. O Briefing Diário
+Ao abrir o painel, o atleta visualiza imediatamente uma síntese direta de 5 elementos essenciais:
+
+1. **Disponibilidade de Treino (ex.: `42/100`):** Mede a capacidade biológica do dia para absorção de carga.
+   * *Nota de Design:* O rótulo "Disponibilidade de Treino" substitui o termo "Preparação" para evitar a falsa interpretação de que o número indica percentual de condicionamento físico geral do atleta.
+2. **Decisão do Dia (Hoje):** Status direto com símbolo visual rápido:
+   * 🟢 **Treino Mantido**
+   * 🟡 **Ajuste de Carga**
+   * 🔴 **Recuperação Ativa**
+3. **Treino Prescrito:** Duração e tipo do treino ajustado (ex.: `25 minutos leve`).
+4. **Por quê? (Justificativa Humana):** Explicação simples, contextual e sem jargões como "depuração metabólica" (ex.: *"Seu sono foi reduzido e você relatou cansaço. Vamos recuperar hoje para treinar melhor amanhã"*).
+5. **Confiança da Decisão:** Nível de confiabilidade (*Alta / Moderada / Básica*) calculado a partir da quantidade e consistência dos dados biométricos preenchidos.
+
+### 2.2. Transparência Gradual (Ver Análise Avançada)
+Se o atleta ou o treinador desejar examinar os bastidores científicos, um botão dedicado aciona o **Modal de Análise Avançada**, expondo a matriz matemática completa:
+* Fórmula de ponderação do score de prontidão
+* Gráfico e valores de VFC (HRV) em relação à linha de base
+* Cálculo da razão de carga de trabalho aguda/crônica (ACWR) via EWMA
+* Indicadores de Monotonia e Carga de Estresse (Strain) de Foster
+
+---
+
+## 3. Motor de Prontidão Fisiológica (Readiness Engine)
+
+O motor calcula a capacidade do organismo de responder positivamente ao estresse do treino no dia corrente.
+
+### 3.1. Ponderação Científica sem Dupla Contagem (Base 100%)
+
+Para evitar a sobreposição de métricas correlacionadas (como o Body Battery da Garmin, que já internaliza HRV e sono), o Aetheris distribui os pesos da seguinte forma:
+
+| Indicador | Peso (%) | Métrica Analisada | Justificativa Fisiológica |
+|---|---|---|---|
+| **Sono Total** | **40%** | Horas de sono (20%) + Sleep Score (20%) | Restauração neuroendócrina e recuperação celular primária |
+| **Percepção Subjetiva** | **20%** | Escala de disposição (1 a 5) | Resposta integrada do Sistema Nervoso Central (SNC) |
+| **VFC / HRV** | **15%** | Desvio em relação à baseline de 21 dias | Tônus parassimpático e moduladores do estresse autônomo |
+| **Body Battery** | **15%** | Nível de reserva (0-100%) | Leitura integrativa do estado energético do dispositivo |
+| **Dor Muscular** | **10%** | Escala visual de dor (1-10) | Integridade tecidual e risco de estiramento miofascial |
+
+### 3.2. Teto de Penalização Proporcional (-25 pts)
+Se múltiplos estressores agudos coincidirem (ex.: sono restrito + dor muscular elevada + VFC desequilibrada), a soma das penalidades brutas é limitada a um **teto de -25 pontos**, impedindo scores irracionais (zerados) e mantendo a sensibilidade fisiológica.
+
+### 3.3. Capacidade Estimada por Modalidade
+A interface traduz o score numérico em orientações qualitativas acionáveis por tipo de treino, evitando percentuais de falsa precisão matemática:
+
+* **Mobilidade & Core:** 🟢 Liberada
+* **Rodagem Leve (Z2):** 🟢 Liberada / 🟢 Permitida com ajuste
+* **Tempo Run / Limiar:** 🟡 Adiar / 🔴 Evitar hoje
+* **Intervalados / Tiros:** 🔴 Evitar hoje
+
+---
+
+## 4. Modelo de Carga de Treino: EWMA & Análise de Microciclo
+
+### 4.1. Decaimento Exponencial Movel (EWMA)
+Em vez de taxas fixas de redução linear, o Aetheris adota o modelo **EWMA (Exponentially Weighted Moving Average)** para espelhar o decaimento assintótico da fadiga biológica:
+
+* **ATL (Fadiga Aguda - 7 dias):** Constante de tempo $\alpha = 0.20$.
+  Em dias de descanso:
+  $$\text{ATL}_{\text{hoje}} = \text{ATL}_{\text{ontem}} \times (1 - 0.20)^d$$
+  *(onde $d$ é o número de dias sem treino)*
+
+* **CTL (Aptidão Crônica - 28 a 42 dias):** Constante de tempo $\alpha = 0.07$.
+  Representa a base estrutural acumulada pelo atleta.
+
+* **ACWR (Acute-to-Chronic Workload Ratio):**
   $$\text{ACWR} = \frac{\text{ATL}}{\text{CTL}}$$
-  Funciona como um indicador de alerta sobre a velocidade de progressão da carga (Faixa Ótima: $0,80 \le \text{ACWR} \le 1,30$; Zona de Transição: $>1,30$; Pico Crítico: $>1,50$).
+  * **0.8 a 1.3:** Faixa ótima de carga (Sweet Spot)
+  * **> 1.3:** Carga elevada / Atencioso para sobrecarga
+  * **> 1.5:** Zona de perigo de lesão
+
+### 4.2. Monotonia e Estresse do Microciclo (Foster)
+O monitoramento da variabilidade semanal previne a adaptação negativa e o overtraining:
+
+$$\text{Monotonia} = \frac{\text{Média da Carga Diária}}{\text{Desvio Padrão da Carga Diária}}$$
+
+$$\text{Strain (Estresse)} = \text{Carga Semanal Total} \times \text{Monotonia}$$
+
+* **Monotonia < 1.5:** Alternância saudável de estresse.
+* **Monotonia ≥ 2.0:** Alerta de treino monótono (alto risco de estagnação).
 
 ---
 
-## 3. Calibração e Ponderação de Biomarcadores (Pontuação de Readiness)
+## 5. Prescrição Adaptativa e Comparativos
 
-O *Score Base de Readiness* ($0-100$) é composto por 6 pilares com pesos calibrados para mitigar redundâncias (ex: sobreposição entre Body Battery, VFC e Sono):
+### 5.1. Comparação Transparente: Plano Original vs. Ajuste de Hoje
+Para dar segurança ao atleta e clareza sobre as decisões do algoritmo, o sistema exibe o contraste entre o planejamento semanal e o ajuste diário:
 
-| Pilar / Biomarcador | Peso | Justificativa Fisiológica |
-| :--- | :---: | :--- |
-| **Quantidade de Sono** | **20%** | Reparação celular, síntese proteica e restauração neural. |
-| **Qualidade de Sono / Score** | **20%** | Arquitetura do sono (fases profundas e REM). |
-| **Sensação Subjetiva do Atleta** | **20%** | Percepção central; o sistema nervoso percebe a fadiga antes dos sensores. |
-| **VFC / HRV (vs Baseline 21 dias)** | **15%** | Modulação autonômica parassimpática comparada ao histórico pessoal do atleta. |
-| **Body Battery (Garmin)** | **15%** | Reserva energética geral (calibrado para evitar dupla contagem com VFC/Sono). |
-| **Dor Muscular / Mecânica** | **10%** | Integridade do sistema musculoesquelético (estresse mecânico local). |
+```
+Plano Original (Terça-feira): Rodagem Base Z2 (45 min)
+↓
+Ajuste de Hoje: Rodagem Regenerativa Z1/Z2 (25 min)
+```
 
-### Moduladores e Teto de Penalização Protegido
-Apenas aplicar o score base poderia ignorar picos isolados de estresse. O motor aplica penalidades moduladoras (ex: elevação da FC de repouso, dias consecutivos sem treino, pico de ACWR).
-- **Proteção por Teto de Penalidade:** O total de penalidades acumuladas possui um teto máximo rígido de **$-25\text{ pontos}$**. Isso evita a "espiral de penalização" quando múltiplos estressores ocorrem no mesmo dia.
+### 5.2. Orientação Prática do Treinador (Regra do Aquecimento)
+Toda prescrição ajustada inclui a regra de segurança em campo:
+> *"Se durante o aquecimento a FC subir acima do esperado ou a percepção de esforço ficar ≥5/10, substitua o treino por caminhada + mobilidade."*
 
 ---
 
-## 4. Convergência de Evidências no Motor de Decisão
+## 6. Módulos Técnicos e Estrutura do Código
 
-A tomada de decisão não depende de uma única variável "soberana". O motor avalia o alinhamento dos sinais:
-
-```
-                     ┌────────────────────────────────┐
-                     │    CONVERGÊNCIA DE EVIDÊNCIAS  │
-                     └───────────────┬────────────────┘
-                                     │
-      ┌──────────────────────────────┼──────────────────────────────┐
-      ▼                              ▼                              ▼
- 🟢 VERDE (80-100)            🟡 AMARELO (55-79)             🔴 VERMELHO (<55)
- • Carga e recuperação        • Margem adaptativa reduzida  • Estresse elevado
-   alinhadas                    • Mantém consistência,        • Foco em recuperação
- • Manter treino planejado      ajusta intensidade            • Rodagem Z2 leve,
-                                (ex: Tiros ➔ Zona 2)          mobilidade ou descanso
-```
+* `/src/coach/coachEngine.ts`: Motor puramente funcional em TypeScript. Não contém estados de React nem efeitos colaterais.
+* `/src/components/CoachWorkspace.tsx`: Workspace principal integrando o Briefing do Atleta, Prescrição, Calibração de Dados do Garmin e Modal de Auditoria Fisiológica.
+* `/src/components/TelemetryCharts.tsx`: Análise visual de telemetria baseada em dados reais de corrida.
+* `/src/components/GpsMap.tsx`: Renderização do trajeto e métricas espaciais de rotas.
+* `/src/i18n/LanguageContext.tsx`: Internacionalização dinâmica (PT, EN, ES, DE, FR, NL, IT).
 
 ---
 
-## 5. Estrutura de Código e Módulos do Projeto
+## 7. Exportação e Compatibilidade Externa
 
-O projeto é construído em **React 18 + TypeScript + Vite + Tailwind CSS** no frontend, com um servidor **Node.js (Express)** no backend proxyando chamadas da **API Gemini** para diagnósticos do Coach AI.
-
-```
-/
-├── server.ts                    # Entry point do servidor Express (API + Vite Middleware)
-├── src/
-│   ├── coach/
-│   │   ├── coachEngine.ts       # Motor fisiológico puro (Readiness, EWMA, ACWR, Adjustments)
-│   │   └── types.ts             # Tipagem do modelo biológico (DailyMetrics, Readiness, TrainingLoad)
-│   ├── components/
-│   │   ├── CoachWorkspace.tsx   # Dashboard principal do treinador e interface visual
-│   │   ├── TelemetryCharts.tsx  # Gráficos de telemetria e evolução fisiológica
-│   │   ├── AthleteProfileForm.tsx # Cadastro e parâmetros do atleta (VO2max, VAM, Limiares)
-│   │   ├── GpsMap.tsx           # Visualização de rotas e telemetria de GPS
-│   │   └── LanguageSelector.tsx # Seleção de idiomas (i18n)
-│   ├── data/                    # Dados de treino e mock de demonstração
-│   ├── i18n/                    # Dicionários de internacionalização (PT-BR, EN, ES)
-│   └── App.tsx                  # Aplicação React principal
-├── metadata.json                # Metadados do applet
-└── package.json                 # Dependências e scripts de build
-```
-
----
-
-## 6. Fluxo de Execução do Algoritmo
-
-1. **Entrada de Dados:** Inserção de métricas diárias do atleta (sono, VFC, FC repouso, percepção, dor, Body Battery).
-2. **Cálculo da Carga Histórica:** Avaliação da distância semanal e mensal para calcular a carga crônica (CTL) e aguda (ATL com EWMA).
-3. **Cálculo da Razão ACWR:** Determinação da relação $\text{ATL}/\text{CTL}$ em unidades de *Training Load*.
-4. **Processamento do Score Base:** Avaliação dos 6 pilares biométricos ponderados.
-5. **Aplicação do Teto de Moduladores:** Verificação de alertas de FC de repouso, destreino e picos de carga com teto de $-25\text{ pts}$.
-6. **Motor Prescritivo de Treino (`adjustNextWorkout`):** Ajuste fino do treino planejado (redução de volume em Zona 2, conversão de tiros de alta intensidade em regenerativo, ou indicação de descanso ativo).
-7. **Explicação ao Atleta / Treinador:** Geração da fundamentação em linguagem fisiológica humanizada.
+* **Garmin Connect JSON Workouts:** Geração de treinos estruturados para download com metas de Frequência Cardíaca (fórmula de Karvonen) e ritmo (Pace).
+* **Analisador de Arquivos FIT/GPX:** Processamento de telemetria pós-treino para recalculo real da carga acumulada.

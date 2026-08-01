@@ -362,10 +362,10 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
       <div className="flex flex-col items-center justify-center h-full text-slate-400 bg-black/40 rounded-2xl border border-white/5 p-8 text-center min-h-[350px]">
         <Route className="w-10 h-10 mb-3 text-slate-600" />
         <h4 className="text-sm font-bold text-slate-300 font-mono uppercase tracking-wider">
-          Sem Dados de Mapa GPS
+          {t("noGpsData", "Sem Dados de Mapa GPS")}
         </h4>
         <p className="text-xs text-slate-500 mt-1 max-w-xs font-sans">
-          Esta atividade não possui coordenadas de geolocalização salvas (ex: treino indoor em esteira ou rolo).
+          {t("noGpsDesc", "Esta atividade não possui coordenadas de geolocalização salvas (ex: treino indoor em esteira ou rolo).")}
         </p>
       </div>
     );
@@ -377,10 +377,10 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 pb-3 border-b border-white/5 mb-3">
         <div>
           <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest font-mono bg-cyan-500/10 text-cyan-400 mb-1">
-            <Route className="w-3.5 h-3.5" /> Telemetria de Percurso GPS
+            <Route className="w-3.5 h-3.5" /> {t("gpsTelemetry", "Telemetria de Percurso GPS")}
           </span>
           <h3 className="text-xs sm:text-sm font-bold text-slate-200 tracking-wide uppercase font-mono flex items-center gap-2">
-            Mapa Interativo com Variação Fisiológica
+            {t("interactiveMapTitle", "Mapa Interativo com Variação Fisiológica")}
           </h3>
         </div>
 
@@ -394,7 +394,7 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
                 : "text-slate-400 hover:text-white"
             }`}
           >
-            <Wind className="w-3 h-3 text-emerald-400" /> Pace (Ritmo)
+            <Wind className="w-3 h-3 text-emerald-400" /> {t("pace", "Pace (Ritmo)")}
           </button>
 
           <button
@@ -405,7 +405,7 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
                 : "text-slate-400 hover:text-white"
             }`}
           >
-            <Gauge className="w-3 h-3 text-cyan-400" /> Velocidade
+            <Gauge className="w-3 h-3 text-cyan-400" /> {t("speed", "Velocidade")}
           </button>
 
           {hasHr && (
@@ -417,7 +417,7 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              <Activity className="w-3 h-3 text-red-400" /> FC (BPM)
+              <Activity className="w-3 h-3 text-red-400" /> {t("hrBpm", "FC (BPM)")}
             </button>
           )}
 
@@ -430,7 +430,7 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              <Zap className="w-3 h-3 text-yellow-400" /> Potência
+              <Zap className="w-3 h-3 text-yellow-400" /> {t("power", "Potência")}
             </button>
           )}
 
@@ -443,7 +443,7 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              <TrendingUp className="w-3 h-3 text-purple-400" /> Altitude
+              <TrendingUp className="w-3 h-3 text-purple-400" /> {t("altitude", "Altitude")}
             </button>
           )}
 
@@ -455,7 +455,7 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
                 : "text-slate-400 hover:text-white"
             }`}
           >
-            <Route className="w-3 h-3" /> Ciano
+            <Route className="w-3 h-3" /> {t("solidCyan", "Ciano")}
           </button>
         </div>
       </div>
@@ -465,24 +465,24 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
         {activeMode === "solid" && (
           <div className="flex items-center gap-2">
             <span className="w-3 h-3 rounded-full bg-cyan-400 shadow-glow-cyan"></span>
-            <span>Rota Rastreada em Ciano Neon (Caminho contínuo)</span>
+            <span>{t("solidTrackedPath", "Rota Rastreada em Ciano Neon (Caminho contínuo)")}</span>
           </div>
         )}
 
         {activeMode === "pace" && (
           <div className="flex flex-wrap items-center justify-between w-full gap-2">
             <span className="text-slate-400 font-bold uppercase flex items-center gap-1">
-              <Wind className="w-3 h-3 text-emerald-400" /> Variação Dinâmica de Pace (Ritmo):
+              <Wind className="w-3 h-3 text-emerald-400" /> {t("paceVariation", "Variação Dinâmica de Pace (Ritmo):")}
             </span>
             <div className="flex items-center gap-3 flex-wrap">
               <span className="flex items-center gap-1 text-cyan-300 font-bold">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#06b6d4]"></span> ⚡ Rápido: {formatSpeedToPace(60 / minPaceDec)} /km
+                <span className="w-2.5 h-2.5 rounded-full bg-[#06b6d4]"></span> ⚡ {t("fast", "Rápido")}: {formatSpeedToPace(60 / minPaceDec)} /km
               </span>
               <span className="flex items-center gap-1 text-yellow-300 font-bold">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> 🟡 Médio: {formatSpeedToPace(60 / avgPaceDec)} /km
+                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> 🟡 {t("medium", "Médio")}: {formatSpeedToPace(60 / avgPaceDec)} /km
               </span>
               <span className="flex items-center gap-1 text-red-400 font-bold">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#ef4444]"></span> 🔴 Lento: {formatSpeedToPace(60 / maxPaceDec)} /km
+                <span className="w-2.5 h-2.5 rounded-full bg-[#ef4444]"></span> 🔴 {t("slow", "Lento")}: {formatSpeedToPace(60 / maxPaceDec)} /km
               </span>
             </div>
           </div>
@@ -491,17 +491,17 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
         {activeMode === "speed" && (
           <div className="flex flex-wrap items-center justify-between w-full gap-2">
             <span className="text-slate-400 font-bold uppercase flex items-center gap-1">
-              <Gauge className="w-3 h-3 text-cyan-400" /> Variação Dinâmica de Velocidade:
+              <Gauge className="w-3 h-3 text-cyan-400" /> {t("speedVariation", "Variação Dinâmica de Velocidade:")}
             </span>
             <div className="flex items-center gap-3 flex-wrap">
               <span className="flex items-center gap-1 text-red-400 font-bold">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#ef4444]"></span> 🔴 Mín: {minSpeed.toFixed(1)} km/h
+                <span className="w-2.5 h-2.5 rounded-full bg-[#ef4444]"></span> 🔴 {t("min", "Mín")}: {minSpeed.toFixed(1)} km/h
               </span>
               <span className="flex items-center gap-1 text-yellow-300 font-bold">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> 🟡 Média: {avgSpeed.toFixed(1)} km/h
+                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> 🟡 {t("avg", "Média")}: {avgSpeed.toFixed(1)} km/h
               </span>
               <span className="flex items-center gap-1 text-cyan-300 font-bold">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#06b6d4]"></span> ⚡ Máx: {maxSpeed.toFixed(1)} km/h
+                <span className="w-2.5 h-2.5 rounded-full bg-[#06b6d4]"></span> ⚡ {t("max", "Máx")}: {maxSpeed.toFixed(1)} km/h
               </span>
             </div>
           </div>
@@ -510,17 +510,17 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
         {activeMode === "heartRate" && (
           <div className="flex flex-wrap items-center justify-between w-full gap-2">
             <span className="text-slate-400 font-bold uppercase flex items-center gap-1">
-              <Activity className="w-3 h-3 text-red-400" /> Variação de Frequência Cardíaca:
+              <Activity className="w-3 h-3 text-red-400" /> {t("hrVariation", "Variação de Frequência Cardíaca:")}
             </span>
             <div className="flex items-center gap-3 flex-wrap">
               <span className="flex items-center gap-1 text-emerald-400">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#10b981]"></span> Mín: {minHr} bpm
+                <span className="w-2.5 h-2.5 rounded-full bg-[#10b981]"></span> {t("min", "Mín")}: {minHr} bpm
               </span>
               <span className="flex items-center gap-1 text-yellow-300">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> Média: {avgHr} bpm
+                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> {t("avg", "Média")}: {avgHr} bpm
               </span>
               <span className="flex items-center gap-1 text-red-400 font-bold">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#ef4444]"></span> Pico: {maxHr} bpm
+                <span className="w-2.5 h-2.5 rounded-full bg-[#ef4444]"></span> {t("peak", "Pico")}: {maxHr} bpm
               </span>
             </div>
           </div>
@@ -529,17 +529,17 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
         {activeMode === "power" && (
           <div className="flex flex-wrap items-center justify-between w-full gap-2">
             <span className="text-slate-400 font-bold uppercase flex items-center gap-1">
-              <Zap className="w-3 h-3 text-yellow-400" /> Variação de Potência:
+              <Zap className="w-3 h-3 text-yellow-400" /> {t("powerVariation", "Variação de Potência:")}
             </span>
             <div className="flex items-center gap-3 flex-wrap">
               <span className="flex items-center gap-1">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#38bdf8]"></span> Mín: {minPower} W
+                <span className="w-2.5 h-2.5 rounded-full bg-[#38bdf8]"></span> {t("min", "Mín")}: {minPower} W
               </span>
               <span className="flex items-center gap-1 font-bold text-yellow-400">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> Média: {Math.round((minPower + maxPower) / 2)} W
+                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> {t("avg", "Média")}: {Math.round((minPower + maxPower) / 2)} W
               </span>
               <span className="flex items-center gap-1 text-purple-300 font-bold">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#a855f7]"></span> Pico: {maxPower} W
+                <span className="w-2.5 h-2.5 rounded-full bg-[#a855f7]"></span> {t("peak", "Pico")}: {maxPower} W
               </span>
             </div>
           </div>
@@ -548,17 +548,17 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
         {activeMode === "altitude" && (
           <div className="flex flex-wrap items-center justify-between w-full gap-2">
             <span className="text-slate-400 font-bold uppercase flex items-center gap-1">
-              <TrendingUp className="w-3 h-3 text-purple-400" /> Perfil de Elevação:
+              <TrendingUp className="w-3 h-3 text-purple-400" /> {t("elevationProfile", "Perfil de Elevação:")}
             </span>
             <div className="flex items-center gap-3 flex-wrap">
               <span className="flex items-center gap-1 text-indigo-300">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#6366f1]"></span> Mín: {minAlt.toFixed(0)}m
+                <span className="w-2.5 h-2.5 rounded-full bg-[#6366f1]"></span> {t("min", "Mín")}: {minAlt.toFixed(0)}m
               </span>
               <span className="flex items-center gap-1 text-sky-300">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#38bdf8]"></span> Média: {((minAlt + maxAlt) / 2).toFixed(0)}m
+                <span className="w-2.5 h-2.5 rounded-full bg-[#38bdf8]"></span> {t("avg", "Média")}: {((minAlt + maxAlt) / 2).toFixed(0)}m
               </span>
               <span className="flex items-center gap-1 text-yellow-300 font-bold">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> Pico: {maxAlt.toFixed(0)}m
+                <span className="w-2.5 h-2.5 rounded-full bg-[#eab308]"></span> {t("peak", "Pico")}: {maxAlt.toFixed(0)}m
               </span>
             </div>
           </div>
@@ -569,7 +569,7 @@ export default function GpsMap({ gpsPath, records = [], sport = "running" }: Gps
       <div className="relative w-full h-[360px] sm:h-[420px] rounded-xl overflow-hidden border border-white/10 bg-brand-dark group">
         <div ref={mapContainerRef} className="w-full h-full" id="map-leaflet-telemetry" />
         <div className="absolute bottom-3 left-3 z-[1000] bg-black/85 backdrop-blur-md px-2.5 py-1 rounded-lg border border-white/10 text-[10px] font-mono text-slate-400 flex items-center gap-1.5">
-          <Info className="w-3 h-3 text-cyan-400" /> Clique em qualquer segmento para ver a telemetria do ponto
+          <Info className="w-3 h-3 text-cyan-400" /> {t("mapClickInfo", "Clique em qualquer segmento para ver a telemetria do ponto")}
         </div>
       </div>
     </div>

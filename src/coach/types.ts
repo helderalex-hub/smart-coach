@@ -30,10 +30,22 @@ export interface Athlete {
   goal?: Goal;
 }
 
+export interface StructuredInjury {
+  id: string;
+  type: string;
+  startDate?: string;
+  status: "em_tratamento" | "curada" | "cronica";
+  side: "direito" | "esquerdo" | "ambos";
+  limitation?: string;
+}
+
 export interface AthleteProfile {
+  firstName?: string;
+  lastName?: string;
   name: string;
   gender?: string;
   age?: number;
+  birthDate?: string;
   heightCm?: number;
   weightCurrentKg?: number;
   weightGoalKg?: number | string;
@@ -63,6 +75,82 @@ export interface AthleteProfile {
   recentPaceOrTime?: string;
   strengthEquipment?: string;
   availableDays?: string[];
+  startedFastInLastWorkouts?: boolean;
+  hrSpikesEarly?: boolean;
+  finishesStrong?: boolean;
+  dropsIntenseWorkouts?: boolean;
+
+  // Layer 1: Perfil do Atleta
+  targetWeightKg?: number | string;
+  multipleGoals?: string[];
+  experienceLevel?: "iniciante" | "intermediario" | "avancado";
+  sportsHistoryList?: string[];
+
+  // Layer 2: Perfil Fisiológico & Saúde
+  hrZoneMode?: "auto_garmin" | "manual";
+  thresholdHR?: number | string;
+  thresholdPace?: string;
+  vo2Max?: number | string;
+  baselineHRV?: number | string;
+  bodyFatPercent?: number | string;
+  muscleMassKg?: number | string;
+  structuredInjuries?: StructuredInjury[];
+  clinicalConditions?: string[];
+
+  // Layer 3: Restrições & Viabilidade ("O que é possível?")
+  preferredTimeOfDay?: "manha" | "almoco" | "tarde" | "noite";
+  doubleSessionsAllowed?: boolean;
+  sessionsPerDay?: 1 | 2 | number | string;
+  logistics?: string;
+  routineType?: string;
+  turno1TimeMinutes?: number;
+  turno1PreferredTime?: string;
+  turno2TimeMinutes?: number;
+  turno2PreferredTime?: string;
+  timePerShiftMinutes?: number;
+  availableTimeMinutes?: number;
+  preferredTerrain?: string[];
+  hasGymAccess?: boolean;
+  hasTreadmillAccess?: boolean;
+  hasTrackAccess?: boolean;
+  equipmentsList?: string[];
+
+  // Layer 4: Integrações
+  connectedApps?: string[];
+
+  // Layer 5: Perfil de Treinamento
+  currentTargetRaceName?: string;
+  currentTargetRaceDate?: string;
+  targetTimeGoal?: string;
+  workoutLengthPreference?: "curtos" | "longos" | "equilibrado";
+
+  // Layer 6: Perfil Nutricional
+  dietType?: "onivora" | "vegetariana" | "vegana" | "low_carb";
+  allergiesIntolerances?: string;
+  nutritionalGoal?: "perder_peso" | "ganhar_massa" | "manter_peso" | "performance";
+
+  // Layer 7: Sono e Estilo de Vida
+  bedTime?: string;
+  wakeTime?: string;
+  nightShiftWork?: boolean;
+  youngChildren?: boolean;
+
+  // Layer 8: Perfil Psicológico
+  missedWorkoutReaction?: "desanimo" | "recupero_depois" | "treino_dobro" | "ignoro";
+  primaryMotivation?: "saude" | "competicao" | "estetica" | "prazer";
+
+  // Layer 9: Baseline Inicial (Dia Zero)
+  baselineCooperTestMeters?: number;
+  baseline5kTime?: string;
+  baseline30minDistanceKm?: number;
+  baselineDate?: string;
+
+  // Layer 10: Configurações do Treinador IA & Memória Profunda
+  coachStyle?: "conservador" | "equilibrado" | "agressivo";
+  coachCommunication?: "tecnica" | "motivacional" | "minimalista";
+  explanationFrequency?: "sempre" | "quando_muda" | "nunca";
+  longTermCoachMemory?: string[];
+  coachMemoryNotes?: string;
 }
 
 export enum ReadinessStatus {
@@ -117,6 +205,10 @@ export interface ReadinessResult {
   temporalTrendMessage?: string;
   formulaSummary?: string;
   confidenceScore?: number; // 0-100%
+  decisionQuality?: "Alta" | "Moderada" | "Limitada";
+  decisionQualityLabel?: string;
+  sourcesUsed?: string[];
+  missingSources?: string[];
   dataInputs?: DataInputAvailability[];
   modulatorsBreakdown?: ReadinessModulatorItem[];
   dailyPhysiologicalObjectives?: string[];
@@ -150,11 +242,19 @@ export interface DailyMetrics {
   hrvStatus?: "balanced" | "unbalanced";
   mood?: string;
   weight?: number;
+  vo2Max?: number;
   prepScore?: number;
   garminReadiness?: number;
   subjectiveFeeling?: SubjectiveFeelingStage;
   daysWithoutTraining?: number;
   garminTrainingLoad?: number;
+  garminTrainingStatus?: "sem_dados" | "mantendo" | "eficaz" | "excessivo" | "ineficiente" | "recuperacao" | string;
+  hasMissedWorkoutInWeek?: boolean;
+  missedWorkoutDaysCount?: number;
+  dietType?: "onivora" | "vegetariana" | "vegana" | "low_carb" | string;
+  athleteWeightKg?: number;
+  primaryMotivation?: "saude" | "competicao" | "estetica" | "prazer" | string;
+  experienceLevel?: "iniciante" | "intermediario" | "avancado" | string;
 }
 
 export enum TrainingIntent {
@@ -238,11 +338,13 @@ export interface TrainingHistory {
 }
 
 export interface TrainingLoad {
-  ctl: number; // Chronic Training Load (fitness)
-  atl: number; // Acute Training Load (fatigue)
-  acuteChronicRatio: number; // ATL/CTL ratio (sweet spot: 0.8 - 1.3)
+  ctl: number; // Chronic Training Load (fitness / capacidade adquirida)
+  atl: number; // Acute Training Load (fatigue / estresse recente)
+  tsb: number; // Training Stress Balance (CTL - ATL / saldo fisiológico)
+  acuteChronicRatio: number; // ACWR (Razão Carga Aguda / Crônica)
   loadStatus: "normal" | "optimal" | "overreaching" | "detraining";
   trend: "stable" | "increasing" | "decreasing";
+  message?: string;
 }
 
 export interface CoachContext {
@@ -253,3 +355,81 @@ export interface CoachContext {
   goal?: Goal;
   athleteProfile?: AthleteProfile;
 }
+
+export type GuidanceCategory =
+  | "seguranca"
+  | "alerta"
+  | "objetivo"
+  | "ritmo"
+  | "tecnica"
+  | "nutricao"
+  | "recuperacao"
+  | "clima"
+  | "psicologia"
+  | "aprendizado";
+
+export interface GuidanceContext {
+  metrics: DailyMetrics;
+  athleteProfile?: AthleteProfile;
+  readinessScore?: number;
+  readinessStatus?: ReadinessStatus;
+  acwr?: number;
+  garminRecoveryTimeHours?: number;
+  hasInjury?: boolean;
+  workoutIntent?: TrainingIntent | string;
+  workoutDurationMinutes?: number;
+  workoutName?: string;
+  isLongRun?: boolean;
+  temperature?: number;
+  weatherCondition?: string;
+  isWindy?: boolean;
+  isUphill?: boolean;
+  completedWorkoutsCount?: number;
+  consecutiveBadSleepNights?: number;
+  hasMissedWorkoutInWeek?: boolean;
+  // Learned patterns flags (Aprendizado do Treinador)
+  startedFastInLastWorkouts?: boolean;
+  improvesWithSleep?: boolean;
+  hrSpikesEarly?: boolean;
+  finishesStrong?: boolean;
+  dropsIntenseWorkouts?: boolean;
+  recentLongRunCompleted?: boolean;
+  // History log for cooldown calculation
+  shownHistory?: Record<string, number>; // id -> timestamp in ms
+}
+
+export interface GuidanceMessage {
+  id: string;
+  categoria: GuidanceCategory;
+  prioridade: number;
+  titulo?: string;
+  regra: (ctx: GuidanceContext) => boolean;
+  texto: string | ((ctx: GuidanceContext) => string);
+  validade?: number; // days
+  cooldownDays?: number; // days until message can reappear
+  podeCombinar?: boolean;
+  objetivoFisiologico?: string;
+  conflictingIds?: string[];
+  isPersonalized?: boolean;
+}
+
+export interface UserAccount {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  role?: "athlete" | "coach" | "admin";
+  createdAt: string;
+  updatedAt: string;
+  consentGdpr: boolean;
+  consentTimestamp: string;
+  termsVersion: string;
+  profile?: AthleteProfile;
+}
+
+export interface AuthSession {
+  token: string;
+  user: UserAccount;
+  expiresAt: string;
+}
+

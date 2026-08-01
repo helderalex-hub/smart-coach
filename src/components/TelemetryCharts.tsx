@@ -42,7 +42,7 @@ export default function TelemetryCharts({ records }: TelemetryChartsProps) {
     return (
       <div className="flex flex-col items-center justify-center h-full min-h-[320px] bg-black/35 border border-white/5 backdrop-blur-md rounded-2xl p-6 text-center text-slate-400 text-xs font-mono">
         <Activity className="w-8 h-8 text-slate-600 mb-2" />
-        <p>Sem registros de telemetria disponíveis para esta atividade.</p>
+        <p>{t("noTelemetryAvailable", "Sem registros de telemetria disponíveis para esta atividade.")}</p>
       </div>
     );
   }
@@ -301,10 +301,10 @@ export default function TelemetryCharts({ records }: TelemetryChartsProps) {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-3 border-b border-white/5 mb-3">
         <div>
           <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest font-mono bg-purple-500/10 text-purple-400 mb-0.5">
-            <Activity className="w-3.5 h-3.5" /> Gráfico do Tempo
+            <Activity className="w-3.5 h-3.5" /> {t("timeChart", "Gráfico do Tempo")}
           </span>
           <h3 className="text-xs sm:text-sm font-bold text-slate-200 tracking-wide uppercase font-mono">
-            Série Temporal de Telemetria
+            {t("telemetryTimeSeries", "Série Temporal de Telemetria")}
           </h3>
         </div>
 
@@ -318,7 +318,7 @@ export default function TelemetryCharts({ records }: TelemetryChartsProps) {
                 : "text-slate-400 hover:text-white"
             }`}
           >
-            <Layers className="w-3 h-3" /> Sobrepor Curvas
+            <Layers className="w-3 h-3" /> {t("overlayCurves", "Sobrepor Curvas")}
           </button>
           <button
             onClick={() => setOverlayMode(false)}
@@ -328,7 +328,7 @@ export default function TelemetryCharts({ records }: TelemetryChartsProps) {
                 : "text-slate-400 hover:text-white"
             }`}
           >
-            <Eye className="w-3 h-3" /> Aba Única
+            <Eye className="w-3 h-3" /> {t("singleTab", "Aba Única")}
           </button>
         </div>
       </div>
@@ -337,7 +337,7 @@ export default function TelemetryCharts({ records }: TelemetryChartsProps) {
       {overlayMode ? (
         <div className="mb-3">
           <p className="text-[10px] text-slate-400 font-mono mb-1.5 flex items-center gap-1">
-            <span>Marque as métricas que deseja sobrepor no mesmo gráfico:</span>
+            <span>{t("selectMetricsToOverlay", "Marque as métricas que deseja sobrepor no mesmo gráfico:")}</span>
           </p>
           <div className="flex flex-wrap gap-1.5">
             {availableMetricKeys.map((key) => {
@@ -492,7 +492,7 @@ export default function TelemetryCharts({ records }: TelemetryChartsProps) {
           )
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-slate-500 text-xs">
-            Nenhum dado válido de telemetria encontrado para este treino.
+            {t("noValidTelemetryData", "Nenhum dado válido de telemetria encontrado para este treino.")}
           </div>
         )}
       </div>

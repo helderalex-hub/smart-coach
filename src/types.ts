@@ -11,6 +11,8 @@ export interface ActivitySummary {
   avgPower: number | null;
   maxPower: number | null;
   avgCadence: number | null;
+  rpe?: number | null;
+  perceivedExertion?: number | null;
 }
 
 export interface TelemetryRecord {

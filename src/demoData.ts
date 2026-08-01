@@ -83,6 +83,8 @@ export function getDemoActivity(): ActivityData {
       avgPower: null,
       maxPower: null,
       avgCadence: 174,
+      rpe: 6,
+      perceivedExertion: 6,
     },
     gpsPath,
     records,

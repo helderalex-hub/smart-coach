@@ -22,7 +22,8 @@ import {
   Waves,
   Zap,
   Check,
-  User
+  User,
+  ShieldCheck
 } from "lucide-react";
 import { ActivityData, SavedActivityListItem } from "./types";
 import GpsMap from "./components/GpsMap";
@@ -30,10 +31,12 @@ import TelemetryCharts from "./components/TelemetryCharts";
 import { getDemoActivity } from "./demoData";
 import CoachWorkspace from "./components/CoachWorkspace";
 import AthleteProfileForm from "./components/AthleteProfileForm";
-import { TrainingHistory } from "./coach/types";
+import { TrainingHistory, AthleteProfile, UserAccount } from "./coach/types";
 import { calculateActivityLoad, compareLoad, adjustNextWorkout, heartRateFactor } from "./coach/coachEngine";
 import { useLanguage } from "./i18n/LanguageContext";
 import LanguageSelector from "./components/LanguageSelector";
+import { UserAuthModal } from "./components/UserAuthModal";
+import { safeSetLocalStorage } from "./utils/storageUtils";
 
 export default function App() {
   const { t } = useLanguage();
@@ -48,74 +51,224 @@ export default function App() {
   const [savedList, setSavedList] = useState<SavedActivityListItem[]>([]);
   const [currentRpe, setCurrentRpe] = useState<number>(5);
   
-  // Track RPE for each active activity
+  // Track RPE for each active activity (.fit telemetry or manual athlete input)
   useEffect(() => {
     if (activeActivity) {
       const savedRpe = localStorage.getItem(`fit_rpe_${activeActivity.id}`);
+      const activityRpe = activeActivity.summary?.rpe ?? 
+                          activeActivity.summary?.perceivedExertion ?? 
+                          activeActivity.summary?.rpeScore ?? 
+                          activeActivity.rpe;
+
       if (savedRpe) {
-        setCurrentRpe(parseInt(savedRpe));
+        setCurrentRpe(parseInt(savedRpe, 10));
+      } else if (activityRpe !== undefined && activityRpe !== null) {
+        const parsed = Number(activityRpe);
+        if (!isNaN(parsed) && parsed >= 1 && parsed <= 10) {
+          setCurrentRpe(parsed);
+        } else {
+          setCurrentRpe(5);
+        }
       } else {
         setCurrentRpe(5);
       }
     }
-  }, [activeActivity?.id]);
+  }, [activeActivity?.id, activeActivity?.summary?.rpe, activeActivity?.summary?.perceivedExertion]);
 
   
+  // User Authentication & Multi-user state
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>({
+    id: "usr_helder_alex",
+    email: "helderalex@gmail.com",
+    firstName: "Helder",
+    lastName: "Alex",
+    role: "athlete",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    consentGdpr: true,
+    consentTimestamp: new Date().toISOString(),
+    termsVersion: "1.0",
+  });
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
+  // Restore current user session from token if available
+  useEffect(() => {
+    const token = localStorage.getItem("auth_token");
+    if (token) {
+      fetch("/api/auth/me", {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.success && data.user) {
+            setCurrentUser(data.user);
+          }
+        })
+        .catch((err) => console.error("Session check error:", err));
+    }
+  }, []);
+
+  // Sync athleteProfile when currentUser changes or loads
+  useEffect(() => {
+    if (currentUser) {
+      const userKey = currentUser.id || currentUser.email;
+      const userProfileStr = localStorage.getItem(`fit_athlete_profile_v4_${userKey}`);
+      if (userProfileStr) {
+        try {
+          setAthleteProfile(JSON.parse(userProfileStr));
+          return;
+        } catch (e) {
+          console.error("Failed parsing user profile from localStorage", e);
+        }
+      }
+      
+      if (currentUser.profile && Object.keys(currentUser.profile).length > 0) {
+        setAthleteProfile((prev) => ({
+          ...prev,
+          firstName: currentUser.firstName || prev.firstName,
+          lastName: currentUser.lastName || prev.lastName,
+          name: `${currentUser.firstName || ""} ${currentUser.lastName || ""}`.trim() || prev.name,
+          ...currentUser.profile,
+        }));
+      }
+    }
+  }, [currentUser]);
+
+  const handleUserChanged = (user: UserAccount | null, token: string | null) => {
+    setCurrentUser(user);
+    if (user) {
+      const fname = user.firstName || "Helder";
+      const lname = user.lastName || "Alex";
+      const fullName = `${fname} ${lname}`.trim();
+      const userKey = user.id || user.email;
+
+      const userProfileStr = localStorage.getItem(`fit_athlete_profile_v4_${userKey}`);
+      if (userProfileStr) {
+        try {
+          setAthleteProfile(JSON.parse(userProfileStr));
+          return;
+        } catch (e) {}
+      }
+
+      setAthleteProfile((prev) => ({
+        ...prev,
+        firstName: fname,
+        lastName: lname,
+        name: fullName,
+        ...(user.profile || {}),
+      }));
+    }
+  };
+
   // Athlete profile state
   const [plannedLoadInput, setPlannedLoadInput] = useState<number>(180);
 
-  const [athleteProfile, setAthleteProfile] = useState<{
-    age: number;
-    weight: number;
-    height: number;
-    heightCm?: number;
-    restingHeartRate: number | "";
-    maxHeartRate: number | "";
-    fitnessLevel: string;
-    trainingGoal: string;
-    objective?: string;
-    weeklyTrainingDays: number;
-    restDay: string;
-    longRunDay: string;
-    limitations: string;
-    best5k: string;
-    best10k: string;
-    bestHalfMarathon: string;
-    estimatedPaceCurrent: string;
-    gender: string;
-    weightGoalKg?: string;
-    availableTimePerWorkout?: string;
-    sportsHistory?: string;
-    longestDistance3Months?: string;
-    recentPaceOrTime?: string;
-    strengthEquipment?: string;
-    availableDays?: string[];
-  }>({
-    age: 46,
-    weight: 90,
-    height: 181,
-    heightCm: 181,
-    restingHeartRate: 60,
-    maxHeartRate: 190,
-    fitnessLevel: "advanced",
-    trainingGoal: "general_fitness",
-    objective: "general_fitness",
-    weeklyTrainingDays: 6,
-    restDay: "Quinta-feira",
-    longRunDay: "Domingo",
-    limitations: "Não tenho",
-    best5k: "20:10",
-    best10k: "42:10",
-    bestHalfMarathon: "1:45:00",
-    estimatedPaceCurrent: "6:20",
-    gender: "Masculino",
-    weightGoalKg: "85",
-    availableTimePerWorkout: "50 minutos",
-    sportsHistory: "Pratico corrida de rua e treinos de força para manter a performance aeróbica.",
-    longestDistance3Months: "21 km",
-    recentPaceOrTime: "Ritmo de 4:50/km a 5:10/km nos treinos ritmados de 10k.",
-    strengthEquipment: "Halteres de 10kg, kettlebell de 14kg e elásticos de resistência",
-    availableDays: ["Segunda-feira", "Terça-feira", "Quarta-feira", "Sexta-feira", "Sábado", "Domingo"],
+  const [athleteProfile, setAthleteProfile] = useState<AthleteProfile>(() => {
+    const saved = localStorage.getItem("fit_athlete_profile_v4");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {}
+    }
+    return {
+      firstName: "Helder",
+      lastName: "Alex",
+      name: "Helder Alex",
+      age: 46,
+      weight: 88,
+      weightCurrentKg: 88,
+      height: 181,
+      heightCm: 181,
+      restingHeartRate: 60,
+      maxHeartRate: 190,
+      fitnessLevel: "intermediate",
+      trainingGoal: "5km",
+      objective: "5km, Emagrecimento",
+      weeklyTrainingDays: 6,
+      restDay: "Quinta-feira",
+      longRunDay: "Domingo",
+      limitations: "Sem lesões ativas no momento",
+      best5k: "28:50",
+      best10k: "57:40",
+      bestHalfMarathon: "2:05:00",
+      estimatedPaceCurrent: "05:46",
+      gender: "Masculino",
+      weightGoalKg: "85",
+      targetWeightKg: 85,
+      availableTimePerWorkout: "50 minutos",
+      sportsHistory: "Pratico corrida de rua focada em 5km e musculação.",
+      longestDistance3Months: "10 km",
+      recentPaceOrTime: "Ritmo de 5:46/km nos treinos ritmados.",
+      strengthEquipment: "Halteres de 10kg e elásticos de resistência",
+      availableDays: ["Segunda-feira", "Terça-feira", "Quarta-feira", "Sexta-feira", "Sábado", "Domingo"],
+      startedFastInLastWorkouts: false,
+      hrSpikesEarly: false,
+      finishesStrong: true,
+      dropsIntenseWorkouts: false,
+
+      // Layer 1: Perfil do Atleta
+      experienceLevel: "intermediario",
+      multipleGoals: ["5km", "Emagrecimento"],
+      sportsHistoryList: ["Corrida de Rua", "Musculação"],
+
+    // Layer 2: Perfil Fisiológico & Saúde
+    hrZoneMode: "auto_garmin",
+    thresholdHR: 170,
+    thresholdPace: "00:05:46",
+    vo2Max: 48,
+    baselineHRV: 62,
+    bodyFatPercent: 22,
+    muscleMassKg: 68,
+    structuredInjuries: [],
+    clinicalConditions: ["Nenhuma"],
+
+    // Layer 3: Preferências
+    preferredTimeOfDay: "manha",
+    preferredTerrain: ["Rua / Asfalto"],
+    hasGymAccess: true,
+    equipmentsList: ["Halteres", "Mini Band", "Elástico de Resistência"],
+    doubleSessionsAllowed: true,
+    sessionsPerDay: 2,
+    turno1TimeMinutes: 50,
+    turno2TimeMinutes: 30,
+    turno1PreferredTime: "Manhã",
+    turno2PreferredTime: "Tarde",
+
+    // Layer 4: Integrações
+    connectedApps: ["Garmin Connect", "Strava"],
+
+    // Layer 5: Perfil de Treinamento (Provas e Metas Opcionais)
+    currentTargetRaceName: "",
+    currentTargetRaceDate: "",
+    targetTimeGoal: "",
+    workoutLengthPreference: "equilibrado",
+
+    // Layer 6: Perfil Nutricional
+    dietType: "onivora",
+    allergiesIntolerances: "Sem intolerâncias",
+    nutritionalGoal: "perder_peso",
+
+    // Layer 7: Sono e Estilo de Vida
+    bedTime: "22:30",
+    wakeTime: "06:00",
+    nightShiftWork: false,
+    youngChildren: false,
+
+    // Layer 8: Perfil Psicológico
+    missedWorkoutReaction: "recupero_depois",
+    primaryMotivation: "performance",
+
+    // Layer 9: Baseline Inicial (Dia Zero - Padrão em branco)
+    baselineCooperTestMeters: undefined,
+    baseline5kTime: "",
+    baseline30minDistanceKm: undefined,
+    baselineDate: "",
+
+    // Layer 10: Configurações do Treinador IA
+    coachStyle: "equilibrado",
+    coachCommunication: "tecnica",
+    explanationFrequency: "quando_muda"
+  };
   });
 
   // UI States
@@ -126,6 +279,7 @@ export default function App() {
   const [profileSaved, setProfileSaved] = useState(false);
   const [showProfileValidationErrors, setShowProfileValidationErrors] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Dynamic physiological training history calculation
@@ -167,6 +321,9 @@ export default function App() {
   // Load activities from server DB
   const loadDbActivities = async () => {
     try {
+      // Ensure backend deduplicates any legacy or newly imported files with matching start time & duration
+      await fetch("/api/activities/deduplicate", { method: "POST" }).catch(() => {});
+
       const res = await fetch("/api/activities");
       if (res.ok) {
         const data = await res.json();
@@ -184,12 +341,31 @@ export default function App() {
             uploadedAt: act.uploadedAt || new Date().toISOString(),
           }));
 
-          setSavedList(listItems);
+          // Also merge with any items stored locally so offline/local workouts are not lost
+          let localItems: SavedActivityListItem[] = [];
+          try {
+            const listStr = localStorage.getItem("fit_activity_list");
+            if (listStr) localItems = JSON.parse(listStr);
+          } catch (e) {}
+
+          const mergedMap = new Map<string, SavedActivityListItem>();
+          listItems.forEach(item => mergedMap.set(item.id, item));
+          localItems.forEach(item => {
+            if (item && item.id && !mergedMap.has(item.id)) {
+              mergedMap.set(item.id, item);
+            }
+          });
+
+          const mergedList = Array.from(mergedMap.values()).sort((a, b) => {
+            return new Date(b.startTime || b.uploadedAt || 0).getTime() - new Date(a.startTime || a.uploadedAt || 0).getTime();
+          });
+
+          setSavedList(mergedList);
           
           dbActivities.forEach((act) => {
-            localStorage.setItem(`fit_activity_data_${act.id}`, JSON.stringify(act));
+            safeSetLocalStorage(`fit_activity_data_${act.id}`, JSON.stringify(act));
           });
-          localStorage.setItem("fit_activity_list", JSON.stringify(listItems));
+          safeSetLocalStorage("fit_activity_list", JSON.stringify(mergedList));
 
           const lastViewedId = localStorage.getItem("fit_last_viewed_id");
           const target = dbActivities.find((a) => a.id === lastViewedId) || dbActivities[0];
@@ -227,8 +403,8 @@ export default function App() {
           const freshDemo = getDemoActivity();
           if (demoIndex !== -1) {
             parsedList[demoIndex].title = freshDemo.aiAnalysis.title;
-            localStorage.setItem("fit_activity_list", JSON.stringify(parsedList));
-            localStorage.setItem("fit_activity_data_demo-golden-gate-trail", JSON.stringify(freshDemo));
+            safeSetLocalStorage("fit_activity_list", JSON.stringify(parsedList));
+            safeSetLocalStorage("fit_activity_data_demo-golden-gate-trail", JSON.stringify(freshDemo));
           }
 
           setSavedList(parsedList);
@@ -264,10 +440,24 @@ export default function App() {
     initData();
   }, []);
 
-  // Save athlete profile to localStorage when changed
+  // Save athlete profile to user-specific storage and backend API when changed
   useEffect(() => {
-    localStorage.setItem("fit_athlete_profile_v4", JSON.stringify(athleteProfile));
-  }, [athleteProfile]);
+    const userKey = currentUser ? (currentUser.id || currentUser.email) : "default";
+    safeSetLocalStorage(`fit_athlete_profile_v4_${userKey}`, JSON.stringify(athleteProfile));
+    safeSetLocalStorage("fit_athlete_profile_v4", JSON.stringify(athleteProfile));
+
+    if (currentUser && currentUser.id) {
+      fetch(`/api/users/${currentUser.id}/profile`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: athleteProfile,
+          firstName: athleteProfile.firstName,
+          lastName: athleteProfile.lastName,
+        }),
+      }).catch((err) => console.error("Error persisting user profile to server:", err));
+    }
+  }, [athleteProfile, currentUser]);
 
   // Set active activity and record to last viewed
   const selectActivity = async (id: string) => {
@@ -276,7 +466,7 @@ export default function App() {
       if (detailStr) {
         const data = JSON.parse(detailStr) as ActivityData;
         setActiveActivity(data);
-        localStorage.setItem("fit_last_viewed_id", id);
+        safeSetLocalStorage("fit_last_viewed_id", id);
         setUploadError(null);
       } else {
         const res = await fetch(`/api/activities/${id}`);
@@ -284,8 +474,8 @@ export default function App() {
           const json = await res.json();
           if (json.success && json.activity) {
             setActiveActivity(json.activity);
-            localStorage.setItem(`fit_activity_data_${id}`, JSON.stringify(json.activity));
-            localStorage.setItem("fit_last_viewed_id", id);
+            safeSetLocalStorage(`fit_activity_data_${id}`, JSON.stringify(json.activity));
+            safeSetLocalStorage("fit_last_viewed_id", id);
             setUploadError(null);
           }
         }
@@ -303,7 +493,7 @@ export default function App() {
 
       const updatedList = savedList.filter((item) => item.id !== id);
       setSavedList(updatedList);
-      localStorage.setItem("fit_activity_list", JSON.stringify(updatedList));
+      safeSetLocalStorage("fit_activity_list", JSON.stringify(updatedList));
       localStorage.removeItem(`fit_activity_data_${id}`);
       
       if (activeActivity && activeActivity.id === id) {
@@ -337,10 +527,10 @@ export default function App() {
 
     const updatedList = [newItem, ...savedList.filter((x) => x.id !== demo.id)];
     setSavedList(updatedList);
-    localStorage.setItem("fit_activity_list", JSON.stringify(updatedList));
-    localStorage.setItem(`fit_activity_data_${demo.id}`, JSON.stringify(demo));
+    safeSetLocalStorage("fit_activity_list", JSON.stringify(updatedList));
+    safeSetLocalStorage(`fit_activity_data_${demo.id}`, JSON.stringify(demo));
     setActiveActivity(demo);
-    localStorage.setItem("fit_last_viewed_id", demo.id);
+    safeSetLocalStorage("fit_last_viewed_id", demo.id);
     setUploadError(null);
     setActiveTab("adaptation"); // Move automatically to Histórico tab
 
@@ -355,100 +545,148 @@ export default function App() {
     }
   };
 
-  // Handle .FIT File Upload
-  const handleFileUpload = async (file: File) => {
-    if (!file) return;
-    
-    // Check extension
-    const ext = file.name.split(".").pop()?.toLowerCase();
-    if (ext !== "fit") {
-      setUploadError("Invalid file type. Please upload a Garmin '.fit' activity file.");
+  // Handle .FIT File Upload (Single or Multiple)
+  const handleFileUpload = async (filesInput: File | File[] | FileList) => {
+    if (!filesInput) return;
+
+    let fileArray: File[] = [];
+    if (filesInput instanceof File) {
+      fileArray = [filesInput];
+    } else if (filesInput instanceof FileList) {
+      fileArray = Array.from(filesInput);
+    } else if (Array.isArray(filesInput)) {
+      fileArray = filesInput;
+    }
+
+    if (fileArray.length === 0) return;
+
+    // Filter .fit files
+    const fitFiles = fileArray.filter((f) => f.name.toLowerCase().endsWith(".fit"));
+    if (fitFiles.length === 0) {
+      setUploadError("Tipo de arquivo inválido. Por favor, envie arquivo(s) de treino Garmin no formato '.fit'.");
+      setUploadNotice(null);
       return;
     }
 
     setIsUploading(true);
     setUploadError(null);
+    setUploadNotice(null);
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("athleteProfile", JSON.stringify(athleteProfile));
+    let successCount = 0;
+    let duplicateCount = 0;
+    let lastNewActivity: ActivityData | null = null;
+    let newItemsAdded: SavedActivityListItem[] = [];
+    let currentSavedList = [...savedList];
+    let errors: string[] = [];
 
-    try {
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        body: formData,
-      });
+    for (let i = 0; i < fitFiles.length; i++) {
+      const file = fitFiles[i];
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("athleteProfile", JSON.stringify(athleteProfile));
 
-      if (!response.ok) {
-        let errMsg = "Failed to process the FIT file.";
-        try {
-          const contentType = response.headers.get("content-type");
-          if (contentType && contentType.includes("application/json")) {
-            const errorData = await response.json();
-            errMsg = errorData.error || errMsg;
-          } else {
-            const text = await response.text();
-            if (text && text.trim().startsWith("{")) {
-              const parsed = JSON.parse(text);
-              errMsg = parsed.error || errMsg;
-            } else if (text && text.length < 300 && !text.includes("<!DOCTYPE") && !text.includes("<!doctype")) {
-              errMsg = text;
+      try {
+        const response = await fetch("/api/analyze", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) {
+          let errMsg = `Falha ao processar o arquivo ${file.name}`;
+          try {
+            const contentType = response.headers.get("content-type");
+            if (contentType && contentType.includes("application/json")) {
+              const errorData = await response.json();
+              errMsg = errorData.error || errMsg;
+            } else {
+              const text = await response.text();
+              if (text && text.trim().startsWith("{")) {
+                const parsed = JSON.parse(text);
+                errMsg = parsed.error || errMsg;
+              }
             }
+          } catch (e) {
+            console.error("Error parsing API error response:", e);
           }
-        } catch (e) {
-          console.error("Error parsing API error response:", e);
+          errors.push(`${file.name}: ${errMsg}`);
+          continue;
         }
-        throw new Error(errMsg);
+
+        const contentType = response.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          errors.push(`${file.name}: Resposta inválida do servidor.`);
+          continue;
+        }
+
+        const rawData = await response.json();
+        const serverAct = rawData.activity || {};
+        const id = serverAct.id || `${Date.now()}-${i}-${file.name.replace(/\s+/g, "_")}`;
+        const isDuplicate = rawData.isDuplicate || false;
+
+        const newActivity: ActivityData = {
+          id,
+          filename: serverAct.filename || file.name,
+          sport: serverAct.sport || rawData.sport || "running",
+          startTime: serverAct.startTime || rawData.startTime,
+          summary: serverAct.summary || rawData.summary,
+          gpsPath: serverAct.gpsPath || rawData.gpsPath,
+          records: serverAct.records || rawData.records,
+          aiAnalysis: serverAct.aiAnalysis || rawData.aiAnalysis,
+          aiEnabled: serverAct.aiEnabled ?? rawData.aiEnabled,
+          uploadedAt: serverAct.uploadedAt || new Date().toISOString(),
+        };
+
+        const newItem: SavedActivityListItem = {
+          id,
+          filename: serverAct.filename || file.name,
+          sport: serverAct.sport || rawData.sport,
+          startTime: serverAct.startTime || rawData.startTime,
+          distanceKm: serverAct.summary?.distanceKm ?? rawData.summary?.distanceKm ?? 0,
+          durationSeconds: serverAct.summary?.durationSeconds ?? rawData.summary?.durationSeconds ?? 0,
+          title: serverAct.aiAnalysis?.title || rawData.aiAnalysis?.title || "Treino",
+          uploadedAt: newActivity.uploadedAt,
+        };
+
+        if (!currentSavedList.some((item) => item.id === id)) {
+          newItemsAdded.push(newItem);
+          currentSavedList = [newItem, ...currentSavedList];
+        }
+
+        safeSetLocalStorage(`fit_activity_data_${id}`, JSON.stringify(newActivity));
+        lastNewActivity = newActivity;
+        successCount++;
+        if (isDuplicate) {
+          duplicateCount++;
+        }
+      } catch (err: any) {
+        console.error("Error uploading file:", file.name, err);
+        errors.push(`${file.name}: ${err.message || "Erro de conexão ao enviar arquivo. Verifique sua conexão ou tente novamente."}`);
       }
-
-      const contentType = response.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-        throw new Error("O servidor de inteligência esportiva retornou um formato inválido de resposta (esperado JSON, mas recebido HTML). Por favor, verifique se o servidor está ativo.");
-      }
-
-      const rawData = await response.json();
-      
-      // Construct saved details
-      const id = `${Date.now()}-${file.name.replace(/\s+/g, "_")}`;
-      const newActivity: ActivityData = {
-        id,
-        filename: file.name,
-        sport: rawData.sport,
-        startTime: rawData.startTime,
-        summary: rawData.summary,
-        gpsPath: rawData.gpsPath,
-        records: rawData.records,
-        aiAnalysis: rawData.aiAnalysis,
-        aiEnabled: rawData.aiEnabled,
-        uploadedAt: new Date().toISOString(),
-      };
-
-      // Add to localStorage list
-      const newItem: SavedActivityListItem = {
-        id,
-        filename: file.name,
-        sport: rawData.sport,
-        startTime: rawData.startTime,
-        distanceKm: rawData.summary.distanceKm,
-        durationSeconds: rawData.summary.durationSeconds,
-        title: rawData.aiAnalysis.title,
-        uploadedAt: newActivity.uploadedAt,
-      };
-
-      const updatedList = [newItem, ...savedList];
-      setSavedList(updatedList);
-      localStorage.setItem("fit_activity_list", JSON.stringify(updatedList));
-      localStorage.setItem(`fit_activity_data_${id}`, JSON.stringify(newActivity));
-      
-      setActiveActivity(newActivity);
-      localStorage.setItem("fit_last_viewed_id", id);
-      setActiveTab("adaptation"); // Move automatically to Histórico tab
-    } catch (err: any) {
-      console.error(err);
-      setUploadError(err.message || "An unexpected error occurred during analysis.");
-    } finally {
-      setIsUploading(false);
     }
+
+    if (newItemsAdded.length > 0) {
+      setSavedList(currentSavedList);
+      safeSetLocalStorage("fit_activity_list", JSON.stringify(currentSavedList));
+    }
+
+    if (lastNewActivity) {
+      setActiveActivity(lastNewActivity);
+      safeSetLocalStorage("fit_last_viewed_id", lastNewActivity.id);
+    }
+
+    if (errors.length > 0) {
+      setUploadNotice(null);
+      if (successCount > 0) {
+        setUploadError(`${successCount} de ${fitFiles.length} arquivos processados. Erros: ${errors.join("; ")}`);
+      } else {
+        setUploadError(`Falha ao importar arquivo(s): ${errors.join("; ")}`);
+      }
+    } else if (duplicateCount > 0 || successCount > 0) {
+      setUploadNotice("Arquivo carregado. Verifique o histórico de treinos.");
+      setUploadError(null);
+    }
+
+    setIsUploading(false);
   };
 
   // Re-analyze active workout using current Athlete Profile
@@ -509,8 +747,13 @@ export default function App() {
       // Update in active state
       setActiveActivity(updatedActivity);
 
-      // Save updated details to localStorage
-      localStorage.setItem(`fit_activity_data_${activeActivity.id}`, JSON.stringify(updatedActivity));
+      // Save updated details to localStorage & server DB
+      safeSetLocalStorage(`fit_activity_data_${activeActivity.id}`, JSON.stringify(updatedActivity));
+      fetch("/api/activities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updatedActivity),
+      }).catch((e) => console.warn("Failed saving reanalyzed activity to server DB:", e));
 
       // Update the title in the sidebar list too
       const updatedList = savedList.map((item) => {
@@ -523,7 +766,7 @@ export default function App() {
         return item;
       });
       setSavedList(updatedList);
-      localStorage.setItem("fit_activity_list", JSON.stringify(updatedList));
+      safeSetLocalStorage("fit_activity_list", JSON.stringify(updatedList));
     } catch (err: any) {
       console.error(err);
       setUploadError(err.message || "Could not complete customized coaching re-analysis.");
@@ -545,8 +788,8 @@ export default function App() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleFileUpload(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFileUpload(e.dataTransfer.files);
     }
   };
 
@@ -556,8 +799,8 @@ export default function App() {
   };
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      handleFileUpload(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      handleFileUpload(e.target.files);
     }
   };
 
@@ -676,9 +919,24 @@ export default function App() {
             </div>
           </div>
 
-          {/* Top Right: Status Indicator & Language Flag Selector */}
+          {/* Top Right: Status Indicator, User Auth & Language Flag Selector */}
           <div className="flex items-center gap-2 sm:gap-3">
-            <div className="hidden xs:flex items-center gap-2 bg-white/5 border border-white/5 px-3 py-1.5 rounded-full backdrop-blur-sm">
+            {/* User Account / Auth Button */}
+            <button
+              onClick={() => setIsAuthModalOpen(true)}
+              className="flex items-center gap-2 bg-slate-900/90 border border-slate-700/80 hover:border-cyan-500/50 px-3 py-1.5 rounded-xl text-xs font-medium text-slate-200 transition-all hover:bg-slate-800 shadow-sm cursor-pointer"
+              title="Gerenciar Conta, Multi-usuários e Privacidade GDPR"
+            >
+              <div className="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 flex items-center justify-center font-bold text-[10px]">
+                {currentUser?.firstName?.[0] || <User className="w-3 h-3" />}
+              </div>
+              <span className="hidden xs:inline text-xs font-semibold text-slate-200">
+                {currentUser ? `${currentUser.firstName} ${currentUser.lastName}` : "Entrar / Cadastrar"}
+              </span>
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            </button>
+
+            <div className="hidden md:flex items-center gap-2 bg-white/5 border border-white/5 px-3 py-1.5 rounded-full backdrop-blur-sm">
               <span className="relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
@@ -692,100 +950,92 @@ export default function App() {
         </div>
       </header>
 
-      {/* Brand Promise Banner */}
-      <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4 relative z-10">
-        <div className="bg-gradient-to-r from-cyan-950/20 via-black/30 to-indigo-950/10 border border-cyan-500/10 rounded-2xl p-4 shadow-sm">
-          <p className="text-xs text-slate-300 font-sans leading-relaxed">
-            {t("brandPromise")}
-          </p>
-        </div>
-      </div>
 
       {/* 2. Navigation Tabs */}
       <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 relative z-10">
-        <div className="flex flex-row flex-wrap md:flex-nowrap items-center gap-2 p-1.5 bg-black/40 border border-white/5 backdrop-blur-md rounded-2xl w-full">
-          {/* 1. Perfil */}
+        <div className="grid grid-cols-2 md:flex md:flex-row md:flex-nowrap items-center gap-2 p-1.5 bg-black/40 border border-white/5 backdrop-blur-md rounded-2xl w-full">
+          {/* Row 1 Col 1: Perfil */}
           <button
             id="tab-profile"
             onClick={() => handleTabChange("profile")}
-            className={`flex-1 md:flex-none py-2.5 px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
+            className={`w-full md:w-auto md:flex-1 lg:flex-none py-2.5 px-3 sm:px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
               activeTab === "profile"
                 ? "bg-gradient-to-r from-cyan-500/15 to-blue-500/15 border-brand-neon/30 text-brand-neon shadow-glow-cyan"
                 : "text-slate-400 hover:text-white border-transparent hover:bg-white/5"
             }`}
           >
-            <User className="w-4 h-4" />
-            {t("tabProfile")}
+            <User className="w-4 h-4 shrink-0" />
+            <span className="truncate">{t("tabProfile")}</span>
           </button>
 
-          {/* 2. Meu Plano */}
+          {/* Row 1 Col 2: Meu Plano */}
           <button
             id="tab-plan"
             onClick={() => handleTabChange("plan")}
-            className={`flex-1 md:flex-none py-2.5 px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
+            className={`w-full md:w-auto md:flex-1 lg:flex-none py-2.5 px-3 sm:px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
               activeTab === "plan"
                 ? "bg-gradient-to-r from-cyan-500/15 to-blue-500/15 border-brand-neon/30 text-brand-neon shadow-glow-cyan"
                 : "text-slate-400 hover:text-white border-transparent hover:bg-white/5"
             }`}
           >
-            <Calendar className="w-4 h-4" />
-            {t("tabPlan")}
+            <Calendar className="w-4 h-4 shrink-0" />
+            <span className="truncate">{t("tabPlan")}</span>
           </button>
 
-          {/* 3. Check-in Diário */}
+          {/* Row 2 Col 1: Check-in Diário */}
           <button
             id="tab-state"
             onClick={() => handleTabChange("state")}
-            className={`flex-1 md:flex-none py-2.5 px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
+            className={`w-full md:w-auto md:flex-1 lg:flex-none py-2.5 px-3 sm:px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
               activeTab === "state"
                 ? "bg-gradient-to-r from-cyan-500/15 to-blue-500/15 border-brand-neon/30 text-brand-neon shadow-glow-cyan"
                 : "text-slate-400 hover:text-white border-transparent hover:bg-white/5"
             }`}
           >
-            <Activity className="w-4 h-4" />
-            {t("tabState")}
+            <Activity className="w-4 h-4 shrink-0" />
+            <span className="truncate">{t("tabState")}</span>
           </button>
 
-          {/* 4. Histórico */}
-          <button
-            id="tab-adaptation"
-            onClick={() => handleTabChange("adaptation")}
-            className={`flex-1 md:flex-none py-2.5 px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
-              activeTab === "adaptation"
-                ? "bg-gradient-to-r from-cyan-500/15 to-blue-500/15 border-brand-neon/30 text-brand-neon shadow-glow-cyan"
-                : "text-slate-400 hover:text-white border-transparent hover:bg-white/5"
-            }`}
-          >
-            <TrendingUp className="w-4 h-4" />
-            {t("tabAdaptation")}
-          </button>
-
-          {/* 5. Treino de Hoje */}
+          {/* Row 2 Col 2: Treino do Dia */}
           <button
             id="tab-today"
             onClick={() => handleTabChange("today")}
-            className={`flex-1 md:flex-none py-2.5 px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
+            className={`w-full md:w-auto md:flex-1 lg:flex-none py-2.5 px-3 sm:px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
               activeTab === "today"
                 ? "bg-gradient-to-r from-cyan-500/15 to-blue-500/15 border-brand-neon/30 text-brand-neon shadow-glow-cyan"
                 : "text-slate-400 hover:text-white border-transparent hover:bg-white/5"
             }`}
           >
-            <Zap className="w-4 h-4" />
-            {t("tabToday")}
+            <Zap className="w-4 h-4 shrink-0" />
+            <span className="truncate">{t("tabToday")}</span>
           </button>
 
-          {/* 6. Biblioteca */}
+          {/* Row 3 Col 1: Histórico */}
+          <button
+            id="tab-adaptation"
+            onClick={() => handleTabChange("adaptation")}
+            className={`w-full md:w-auto md:flex-1 lg:flex-none py-2.5 px-3 sm:px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
+              activeTab === "adaptation"
+                ? "bg-gradient-to-r from-cyan-500/15 to-blue-500/15 border-brand-neon/30 text-brand-neon shadow-glow-cyan"
+                : "text-slate-400 hover:text-white border-transparent hover:bg-white/5"
+            }`}
+          >
+            <TrendingUp className="w-4 h-4 shrink-0" />
+            <span className="truncate">{t("tabAdaptation")}</span>
+          </button>
+
+          {/* Row 3 Col 2: Biblioteca */}
           <button
             id="tab-library"
             onClick={() => handleTabChange("library")}
-            className={`flex-1 md:flex-none py-2.5 px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
+            className={`w-full md:w-auto md:flex-1 lg:flex-none py-2.5 px-3 sm:px-4 rounded-xl text-xs font-bold font-mono tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer border ${
               activeTab === "library"
                 ? "bg-gradient-to-r from-cyan-500/15 to-blue-500/15 border-brand-neon/30 text-brand-neon shadow-glow-cyan"
                 : "text-slate-400 hover:text-white border-transparent hover:bg-white/5"
             }`}
           >
-            <Layers className="w-4 h-4" />
-            {t("tabLibrary")}
+            <Layers className="w-4 h-4 shrink-0" />
+            <span className="truncate">{t("tabLibrary")}</span>
           </button>
         </div>
       </div>
@@ -803,6 +1053,7 @@ export default function App() {
             handleFileUpload={handleFileUpload}
             isUploading={isUploading}
             uploadError={uploadError}
+            uploadNotice={uploadNotice}
             activeActivity={activeActivity}
             setActiveActivity={setActiveActivity}
             currentRpe={currentRpe}
@@ -974,7 +1225,15 @@ export default function App() {
                 const hrFactorValue = heartRateFactor(avgHrVal);
                 const calculatedLoad = calculateActivityLoad(durationMins, currentRpe, avgHrVal);
                 const compResult = compareLoad(plannedLoadInput, calculatedLoad);
-                const coachDecision = adjustNextWorkout(plannedLoadInput, calculatedLoad, currentRpe, 0);
+                const coachDecision = adjustNextWorkout(
+                  plannedLoadInput,
+                  calculatedLoad,
+                  currentRpe,
+                  0,
+                  75,
+                  1.0,
+                  avgHrVal
+                );
 
                 const getRpeDescription = (r: number) => {
                   if (r <= 2) return "Muito Fácil / Regenerativo";
@@ -1042,9 +1301,9 @@ export default function App() {
                         </div>
 
                         <div className="text-[10px] space-y-1 text-slate-400 font-mono leading-relaxed pt-1.5 border-t border-white/5">
-                          <div>Fórmula TRIMP Aplicada:</div>
+                          <div>Fórmula TRIMP (Carga Interna Fisiológica):</div>
                           <div className="text-slate-300">
-                            {durationMins}m × {currentRpe} rpe × {hrFactorValue.toFixed(2)} factor
+                            {durationMins} min em movimento × Fator FC ({hrFactorValue.toFixed(2)}x)
                           </div>
                           <div className="text-[9px] text-slate-500">
                             FC média registrada: {avgHrVal} bpm (zona {avgHrVal < 130 ? "Z1/Fácil" : avgHrVal < 150 ? "Z2/Base" : avgHrVal < 165 ? "Z3/Tempo" : "Z4/Z5"})
@@ -1118,7 +1377,7 @@ export default function App() {
                       
                       <div className="text-right shrink-0">
                         <span className="text-[10px] text-slate-500 font-mono block">Feedback Fisiológico</span>
-                        <strong className="text-xs font-bold text-white font-mono uppercase">{coachDecision.action === "reduce" ? "Fadiga Excessiva" : "Adaptação Saudável"}</strong>
+                        <strong className="text-xs font-bold text-white font-mono uppercase">{coachDecision.action === "reduce" ? "Adequação de Estímulo" : "Assimilação Positiva"}</strong>
                       </div>
                     </div>
                   </div>
@@ -1294,22 +1553,23 @@ export default function App() {
       </main>
 
       {/* 3. Footer */}
-      <footer className="bg-black/60 border-t border-white/5 py-4 mt-12 text-[10px] text-slate-500 font-mono uppercase tracking-[0.1em]">
+      <footer className="bg-black/60 border-t border-white/5 py-4 mt-12 text-[10px] text-slate-500 font-sans tracking-wide">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row justify-between items-center gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <span>KERNEL: 8.2.1-GENESIS</span>
-            <span className="text-slate-700">|</span>
-            <span>ATHLETIC MONITOR: OMEGA</span>
-            <span className="text-slate-700">|</span>
-            <p className="text-slate-400">© 2026 FIT Activity Analyzer.</p>
+            <p className="text-slate-400">© 2026 Aetheris Fit — Plataforma de Fisiologia & Treinamento Adaptativo</p>
           </div>
-          <div className="flex gap-6 items-center">
-            <span>LATENCY: 14MS</span>
-            <span>JITTER: 0.2MS</span>
-            <span className="text-brand-neon font-bold">CONNECTION SECURE // POWERED BY GEMINI 3.5</span>
+          <div className="flex gap-4 items-center font-mono text-[10px] text-slate-500">
+            <span>Powered by Aetheris Engine</span>
           </div>
         </div>
       </footer>
+      {/* User Authentication & GDPR Modal */}
+      <UserAuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        currentUser={currentUser}
+        onUserChanged={handleUserChanged}
+      />
     </div>
   );
 }

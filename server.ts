@@ -3,11 +3,14 @@ import path from "path";
 import multer from "multer";
 import cors from "cors";
 import fs from "fs";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import FitParserModule from "fit-file-parser";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { generateAetherisMicrocycle } from "./src/coach/aetherisMicrocycleEngine.js";
+import { runAetherisSimulationSuite } from "./src/coach/aetherisSimulationSuite.js";
 
 dotenv.config();
 
@@ -28,9 +31,10 @@ const upload = multer({
   limits: { fileSize: 15 * 1024 * 1024 }, // 15MB limit
 });
 
-// Database Storage setup for persistent FIT files
+// Database Storage setup for persistent FIT files and Users
 const DB_DIR = path.join(__dirname, "data");
 const DB_FILE = path.join(DB_DIR, "fit_activities_db.json");
+const USERS_FILE = path.join(DB_DIR, "users_db.json");
 
 if (!fs.existsSync(DB_DIR)) {
   try {
@@ -39,6 +43,109 @@ if (!fs.existsSync(DB_DIR)) {
     console.error("Failed to create data directory for database:", err);
   }
 }
+
+interface StoredUser {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  passwordHash: string;
+  salt: string;
+  role: "athlete" | "coach" | "admin";
+  createdAt: string;
+  updatedAt: string;
+  consentGdpr: boolean;
+  consentTimestamp: string;
+  termsVersion: string;
+  profile?: any;
+}
+
+function getUsersDb(): StoredUser[] {
+  try {
+    if (!fs.existsSync(USERS_FILE)) {
+      // Seed default admin/athlete user if empty
+      const defaultSalt = crypto.randomBytes(16).toString("hex");
+      const defaultHash = crypto.pbkdf2Sync("Atleta123!", defaultSalt, 10000, 64, "sha512").toString("hex");
+      const initialUsers: StoredUser[] = [
+        {
+          id: "usr_helder_alex",
+          email: "helderalex@gmail.com",
+          firstName: "Helder",
+          lastName: "Alex",
+          passwordHash: defaultHash,
+          salt: defaultSalt,
+          role: "athlete",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          consentGdpr: true,
+          consentTimestamp: new Date().toISOString(),
+          termsVersion: "1.0",
+          profile: {
+            name: "Helder Alex",
+            firstName: "Helder",
+            lastName: "Alex",
+            gender: "Masculino",
+            age: 34,
+            heightCm: 178,
+            weightCurrentKg: 72
+          }
+        }
+      ];
+      fs.writeFileSync(USERS_FILE, JSON.stringify(initialUsers, null, 2), "utf-8");
+      return initialUsers;
+    }
+    const raw = fs.readFileSync(USERS_FILE, "utf-8");
+    return JSON.parse(raw) || [];
+  } catch (err) {
+    console.error("Error reading users_db.json:", err);
+    return [];
+  }
+}
+
+function saveUsersDb(users: StoredUser[]) {
+  try {
+    if (!fs.existsSync(DB_DIR)) {
+      fs.mkdirSync(DB_DIR, { recursive: true });
+    }
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error writing to users_db.json:", err);
+  }
+}
+
+// Active sessions map (token -> session)
+const activeSessions = new Map<string, { userId: string; expiresAt: number }>();
+
+function validatePasswordStrength(password: string): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  if (password.length < 8) errors.push("Mínimo de 8 caracteres");
+  if (!/[A-Z]/.test(password)) errors.push("Ao menos 1 letra maiúscula (A-Z)");
+  if (!/[a-z]/.test(password)) errors.push("Ao menos 1 letra minúscula (a-z)");
+  if (!/\d/.test(password)) errors.push("Ao menos 1 número (0-9)");
+  if (!/[@$!%*?&_\-#]/.test(password)) errors.push("Ao menos 1 caractere especial (@, $, !, %, *, ?, &, _, -, #)");
+  return { valid: errors.length === 0, errors };
+}
+
+function hashPassword(password: string, existingSalt?: string): { hash: string; salt: string } {
+  const salt = existingSalt || crypto.randomBytes(16).toString("hex");
+  const hash = crypto.pbkdf2Sync(password, salt, 10000, 64, "sha512").toString("hex");
+  return { hash, salt };
+}
+
+function verifyPassword(password: string, hash: string, salt: string): boolean {
+  try {
+    const { hash: computedHash } = hashPassword(password, salt);
+    return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(computedHash, "hex"));
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeUser(user: StoredUser) {
+  const { passwordHash, salt, ...sanitized } = user;
+  return sanitized;
+}
+
 
 function getDbActivities(): any[] {
   try {
@@ -94,15 +201,82 @@ function normalizeSport(sportRaw: any): string {
   return String(sportRaw) || "running";
 }
 
+function isDuplicateFitActivity(act1: any, act2: any): boolean {
+  if (!act1 || !act2) return false;
+  if (act1.id && act2.id && act1.id === act2.id) return false;
+
+  const t1Raw = act1.startTime || act1.start_time || act1.timestamp;
+  const t2Raw = act2.startTime || act2.start_time || act2.timestamp;
+  if (!t1Raw || !t2Raw) return false;
+
+  const t1 = new Date(t1Raw).getTime();
+  const t2 = new Date(t2Raw).getTime();
+  if (isNaN(t1) || isNaN(t2)) return false;
+
+  // Compare start date & time (tolerance of 2 seconds / 2000 ms)
+  const isSameStartTime = Math.abs(t1 - t2) <= 2000;
+  if (!isSameStartTime) return false;
+
+  // Compare workout duration (tolerance of 2 seconds)
+  const d1 = act1.summary?.durationSeconds ?? act1.durationSeconds ?? act1.totalDurationSeconds ?? 0;
+  const d2 = act2.summary?.durationSeconds ?? act2.durationSeconds ?? act2.totalDurationSeconds ?? 0;
+  const isSameDuration = Math.abs(d1 - d2) <= 2;
+
+  return isSameStartTime && isSameDuration;
+}
+
+function deduplicateDbActivities(): { removedCount: number; removedIds: string[]; keptActivities: any[] } {
+  const current = getDbActivities();
+  const uniqueActivities: any[] = [];
+  const removedIds: string[] = [];
+
+  for (const act of current) {
+    const existingIdx = uniqueActivities.findIndex((existing) => isDuplicateFitActivity(existing, act));
+    if (existingIdx >= 0) {
+      const existing = uniqueActivities[existingIdx];
+      const existingUploadTime = new Date(existing.uploadedAt || 0).getTime();
+      const actUploadTime = new Date(act.uploadedAt || 0).getTime();
+
+      // Rule: delete the last imported one
+      if (actUploadTime >= existingUploadTime) {
+        removedIds.push(act.id);
+      } else {
+        removedIds.push(existing.id);
+        uniqueActivities[existingIdx] = act;
+      }
+    } else {
+      uniqueActivities.push(act);
+    }
+  }
+
+  if (removedIds.length > 0) {
+    saveDbActivities(uniqueActivities);
+    console.log(`[Deduplication] Excluídas ${removedIds.length} atividades .FIT duplicadas: ${removedIds.join(", ")}`);
+  }
+
+  return { removedCount: removedIds.length, removedIds, keptActivities: uniqueActivities };
+}
+
 function addOrUpdateDbActivity(activity: any) {
   const current = getDbActivities();
   const existingIdx = current.findIndex((a) => a.id === activity.id);
   if (existingIdx >= 0) {
     current[existingIdx] = activity;
-  } else {
-    current.unshift(activity); // newest first
+    saveDbActivities(current);
+    return { isDuplicate: false, savedActivity: activity };
   }
+
+  // Check if a duplicate exists with same start date/time and duration
+  const duplicateIdx = current.findIndex((a) => isDuplicateFitActivity(a, activity));
+  if (duplicateIdx >= 0) {
+    const existing = current[duplicateIdx];
+    console.warn(`[Deduplication] Descartando arquivo .FIT duplicado (${activity.filename || activity.id}). Já existe no banco (${existing.filename || existing.id}) com início em ${activity.startTime} e duração ${activity.summary?.durationSeconds || 0}s.`);
+    return { isDuplicate: true, savedActivity: existing, discardedId: activity.id };
+  }
+
+  current.unshift(activity); // newest first
   saveDbActivities(current);
+  return { isDuplicate: false, savedActivity: activity };
 }
 
 function deleteDbActivity(id: string) {
@@ -143,8 +317,10 @@ function convertSemicircles(semi: number | undefined | null): number | null {
 
 // Downsample array to a limit for optimal chart rendering performance
 function downsample<T>(array: T[], limit: number): T[] {
+  if (!array || !Array.isArray(array) || array.length === 0) return [];
+  if (limit <= 0) return [];
   if (array.length <= limit) return array;
-  const step = Math.floor(array.length / limit);
+  const step = Math.max(1, Math.floor(array.length / limit));
   const result: T[] = [];
   for (let i = 0; i < array.length; i += step) {
     if (result.length < limit) {
@@ -161,35 +337,331 @@ function downsample<T>(array: T[], limit: number): T[] {
 // FitParser wrapper in a Promise
 function parseFitFile(buffer: Buffer): Promise<any> {
   return new Promise((resolve, reject) => {
-    // Resolve dynamic module structure if needed
-    const FitParser = (FitParserModule as any).default || FitParserModule;
-    const fitParser = new FitParser({
-      force: true,
-      speedUnit: "km/h",
-      lengthUnit: "m",
-      temperatureUnit: "celcius",
-      elapsedRecordField: true,
-    });
+    try {
+      const FitParser = (FitParserModule as any).default || FitParserModule;
+      const fitParser = new FitParser({
+        force: true,
+        speedUnit: "km/h",
+        lengthUnit: "m",
+        temperatureUnit: "celcius",
+        elapsedRecordField: true,
+      });
 
-    fitParser.parse(buffer, (err: any, data: any) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(data);
-      }
-    });
+      fitParser.parse(buffer, (err: any, data: any) => {
+        if (err) {
+          reject(new Error(`Erro ao decodificar arquivo .FIT: ${err.message || String(err)}`));
+        } else if (!data) {
+          reject(new Error("Arquivo .FIT inválido ou corrompido: nenhum dado extraído."));
+        } else {
+          resolve(data);
+        }
+      });
+    } catch (e: any) {
+      reject(new Error(`Falha no leitor do arquivo .FIT: ${e.message || String(e)}`));
+    }
   });
 }
+
+const handleSingleUpload = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  upload.single("file")(req, res, (err: any) => {
+    if (err) {
+      console.error("Multer upload error:", err);
+      return res.status(400).json({
+        error: err instanceof multer.MulterError
+          ? `Erro no upload: ${err.message}`
+          : `Falha ao receber arquivo: ${err.message || String(err)}`
+      });
+    }
+    next();
+  });
+};
 
 // Core API endpoints
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
 
+// AUTHENTICATION & MULTI-USER API ENDPOINTS (Cybersecurity + GDPR compliant)
+app.post("/api/auth/register", (req, res) => {
+  try {
+    const { email, password, firstName, lastName, consentGdpr } = req.body;
+
+    if (!email || !password || !firstName || !lastName) {
+      return res.status(400).json({ error: "Preencha todos os campos obrigatórios (nome, sobrenome, e-mail e senha)." });
+    }
+
+    if (!consentGdpr) {
+      return res.status(400).json({ error: "Você deve aceitar os termos da LGPD / GDPR para realizar o cadastro com segurança." });
+    }
+
+    const emailNormalized = email.trim().toLowerCase();
+    const users = getUsersDb();
+
+    if (users.some((u) => u.email.toLowerCase() === emailNormalized)) {
+      return res.status(400).json({ error: "Este endereço de e-mail já está cadastrado no sistema." });
+    }
+
+    const passwordCheck = validatePasswordStrength(password);
+    if (!passwordCheck.valid) {
+      return res.status(400).json({
+        error: "A senha não atende aos requisitos de segurança.",
+        details: passwordCheck.errors,
+      });
+    }
+
+    const { hash, salt } = hashPassword(password);
+    const userId = "usr_" + Date.now() + "_" + crypto.randomBytes(4).toString("hex");
+
+    const newUser: StoredUser = {
+      id: userId,
+      email: emailNormalized,
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      passwordHash: hash,
+      salt: salt,
+      role: "athlete",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      consentGdpr: true,
+      consentTimestamp: new Date().toISOString(),
+      termsVersion: "1.0",
+      profile: {
+        name: `${firstName.trim()} ${lastName.trim()}`,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        gender: "Masculino",
+        age: 30,
+        heightCm: 175,
+        weightCurrentKg: 70
+      },
+    };
+
+    users.push(newUser);
+    saveUsersDb(users);
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
+    activeSessions.set(token, { userId, expiresAt });
+
+    res.json({
+      success: true,
+      token,
+      user: sanitizeUser(newUser),
+      message: "Usuário cadastrado com sucesso de acordo com as diretrizes GDPR/LGPD.",
+    });
+  } catch (err: any) {
+    console.error("Error registering user:", err);
+    res.status(500).json({ error: "Erro interno no servidor ao registrar usuário." });
+  }
+});
+
+app.post("/api/auth/login", (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: "Informe e-mail e senha." });
+    }
+
+    const emailNormalized = email.trim().toLowerCase();
+    const users = getUsersDb();
+    const user = users.find((u) => u.email.toLowerCase() === emailNormalized);
+
+    if (!user) {
+      return res.status(401).json({ error: "Credenciais inválidas." });
+    }
+
+    const isValidPassword = verifyPassword(password, user.passwordHash, user.salt);
+    if (!isValidPassword) {
+      return res.status(401).json({ error: "Credenciais inválidas." });
+    }
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
+    activeSessions.set(token, { userId: user.id, expiresAt });
+
+    res.json({
+      success: true,
+      token,
+      user: sanitizeUser(user),
+    });
+  } catch (err: any) {
+    console.error("Error logging in:", err);
+    res.status(500).json({ error: "Erro ao autenticar usuário." });
+  }
+});
+
+app.get("/api/auth/me", (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Não autenticado." });
+    }
+    const token = authHeader.split(" ")[1];
+    const session = activeSessions.get(token);
+    if (!session || session.expiresAt < Date.now()) {
+      if (session) activeSessions.delete(token);
+      return res.status(401).json({ error: "Sessão expirada." });
+    }
+
+    const users = getUsersDb();
+    const user = users.find((u) => u.id === session.userId);
+    if (!user) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    res.json({ success: true, user: sanitizeUser(user) });
+  } catch (err: any) {
+    res.status(500).json({ error: "Erro ao verificar sessão." });
+  }
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.split(" ")[1];
+    activeSessions.delete(token);
+  }
+  res.json({ success: true, message: "Sessão encerrada com segurança." });
+});
+
+app.get("/api/users", (req, res) => {
+  try {
+    const users = getUsersDb();
+    res.json({
+      success: true,
+      count: users.length,
+      users: users.map(sanitizeUser),
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao listar usuários." });
+  }
+});
+
+app.put("/api/users/:id/profile", (req, res) => {
+  try {
+    const userId = req.params.id;
+    const { profile, firstName, lastName } = req.body;
+    const users = getUsersDb();
+    const userIndex = users.findIndex((u) => u.id === userId);
+
+    if (userIndex === -1) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    if (firstName) users[userIndex].firstName = firstName.trim();
+    if (lastName) users[userIndex].lastName = lastName.trim();
+    if (profile) users[userIndex].profile = profile;
+    users[userIndex].updatedAt = new Date().toISOString();
+
+    saveUsersDb(users);
+    res.json({ success: true, user: sanitizeUser(users[userIndex]) });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao atualizar perfil do usuário." });
+  }
+});
+
+app.get("/api/users/:id/profile", (req, res) => {
+  try {
+    const userId = req.params.id;
+    const users = getUsersDb();
+    const user = users.find((u) => u.id === userId);
+    if (!user) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+    res.json({ success: true, profile: user.profile || null });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao carregar perfil do usuário." });
+  }
+});
+
+// GDPR / LGPD DATA PORTABILITY EXPORT (ART. 15 / 20)
+app.get("/api/user/gdpr-export", (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Não autenticado." });
+    }
+    const token = authHeader.split(" ")[1];
+    const session = activeSessions.get(token);
+    if (!session) return res.status(401).json({ error: "Sessão inválida." });
+
+    const users = getUsersDb();
+    const user = users.find((u) => u.id === session.userId);
+    if (!user) return res.status(404).json({ error: "Usuário não encontrado." });
+
+    const activities = getDbActivities();
+
+    const gdprPackage = {
+      exportTimestamp: new Date().toISOString(),
+      gdprComplianceNotice: "Este arquivo contém todas as suas informações pessoais e registros de atividades armazenados na plataforma conforme a LGPD / GDPR.",
+      accountInformation: sanitizeUser(user),
+      activitiesCount: activities.length,
+      activities: activities,
+    };
+
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="gdpr_export_${user.firstName}_${user.lastName}.json"`);
+    res.send(JSON.stringify(gdprPackage, null, 2));
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao exportar dados do usuário." });
+  }
+});
+
+// GDPR / LGPD RIGHT TO BE FORGOTTEN (ART. 17) - PERMANENT ERASURE
+app.delete("/api/user/gdpr-delete", (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Não autenticado." });
+    }
+    const token = authHeader.split(" ")[1];
+    const session = activeSessions.get(token);
+    if (!session) return res.status(401).json({ error: "Sessão inválida." });
+
+    const users = getUsersDb();
+    const userIndex = users.findIndex((u) => u.id === session.userId);
+
+    if (userIndex === -1) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    const deletedUser = users[userIndex];
+    users.splice(userIndex, 1);
+    saveUsersDb(users);
+    activeSessions.delete(token);
+
+    console.log(`[GDPR Erasure] Conta de usuário excluída permanentemente: ${deletedUser.email} (${deletedUser.id})`);
+
+    res.json({
+      success: true,
+      message: "Sua conta e todos os seus dados pessoais foram completamente excluídos conforme a política de privacidade GDPR/LGPD.",
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao excluir conta." });
+  }
+});
+
+
 // Database API endpoints for FIT activities
 app.get("/api/activities", (req, res) => {
   try {
-    const activities = getDbActivities();
+    let activities = getDbActivities();
+    let filterUserId: string | null = null;
+
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.split(" ")[1];
+      const session = activeSessions.get(token);
+      if (session) filterUserId = session.userId;
+    }
+    if (!filterUserId && req.query.userId) {
+      filterUserId = String(req.query.userId);
+    }
+
+    if (filterUserId) {
+      activities = activities.filter((a) => !a.userId || a.userId === filterUserId);
+    }
+
     res.json({ success: true, count: activities.length, activities });
   } catch (e: any) {
     res.status(500).json({ error: "Failed to fetch activities from database." });
@@ -215,6 +687,21 @@ app.post("/api/activities", (req, res) => {
     if (!activity || !activity.id) {
       return res.status(400).json({ error: "Invalid activity data provided." });
     }
+    
+    let filterUserId: string | null = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.split(" ")[1];
+      const session = activeSessions.get(token);
+      if (session) filterUserId = session.userId;
+    }
+    if (!filterUserId && activity.userId) {
+      filterUserId = activity.userId;
+    }
+    if (filterUserId) {
+      activity.userId = filterUserId;
+    }
+
     if (!activity.uploadedAt) {
       activity.uploadedAt = new Date().toISOString();
     }
@@ -243,8 +730,26 @@ app.delete("/api/activities", (req, res) => {
   }
 });
 
+// Dedicated endpoint to remove duplicates from database
+app.post("/api/activities/deduplicate", (req, res) => {
+  try {
+    const result = deduplicateDbActivities();
+    res.json({
+      success: true,
+      message: result.removedCount > 0
+        ? `Deduplicação realizada com sucesso: ${result.removedCount} atividade(s) duplicada(s) excluída(s).`
+        : "Nenhuma atividade duplicada encontrada.",
+      removedCount: result.removedCount,
+      removedIds: result.removedIds,
+      remainingCount: result.keptActivities.length,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: "Falha ao executar deduplicação no banco de dados." });
+  }
+});
+
 // API endpoint to parse and analyze FIT file
-app.post("/api/analyze", upload.single("file"), async (req, res): Promise<any> => {
+app.post("/api/analyze", handleSingleUpload, async (req, res): Promise<any> => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file was uploaded." });
@@ -304,10 +809,11 @@ app.post("/api/analyze", upload.single("file"), async (req, res): Promise<any> =
       };
     });
 
-    // Extract path coordinates for Leaflet map (only if we have lat/lng data)
-    const gpsPath = processedRecords
+    // Extract path coordinates for Leaflet map (only if we have lat/lng data, downsampled for performance)
+    const rawGpsPath = processedRecords
       .filter((r: any) => r.lat !== null && r.lng !== null)
       .map((r: any) => [r.lat, r.lng]);
+    const gpsPath = downsample(rawGpsPath, 1000);
 
     // Calculate summaries from records if session details are sparse
     const hrRecords = processedRecords.filter((r: any) => r.heartRate !== null);
@@ -326,6 +832,28 @@ app.post("/api/analyze", upload.single("file"), async (req, res): Promise<any> =
     const totalDurationSeconds = session.total_timer_time || session.total_elapsed_time || (processedRecords.length > 0
       ? Math.round((new Date(processedRecords[processedRecords.length - 1].timestamp).getTime() - new Date(processedRecords[0].timestamp).getTime()) / 1000)
       : 0);
+
+    // Early Duplicate Check: Check if an activity with same start time and duration is already in DB
+    const candidateSummary = { durationSeconds: totalDurationSeconds };
+    const currentDb = getDbActivities();
+    const existingDuplicate = currentDb.find((a) => isDuplicateFitActivity(a, { startTime, summary: candidateSummary }));
+
+    if (existingDuplicate) {
+      console.log(`[Deduplication] Arquivo .FIT duplicado detectado (${req.file.originalname}). Retornando treino existente no banco (ID: ${existingDuplicate.id}).`);
+      return res.json({
+        success: true,
+        isDuplicate: true,
+        message: "Arquivo carregado. Verifique o histórico de treinos.",
+        activity: existingDuplicate,
+        sport: existingDuplicate.sport,
+        startTime: existingDuplicate.startTime,
+        summary: existingDuplicate.summary,
+        gpsPath: existingDuplicate.gpsPath,
+        records: existingDuplicate.records,
+        aiAnalysis: existingDuplicate.aiAnalysis,
+        aiEnabled: existingDuplicate.aiEnabled,
+      });
+    }
 
     const avgSpeed = session.avg_speed || (totalDurationSeconds > 0 ? (distanceMeters / totalDurationSeconds) * 3.6 : 0);
     const maxSpeed = session.max_speed || (processedRecords.length > 0 ? Math.max(...processedRecords.map((r: any) => r.speed || 0)) : 0);
@@ -346,6 +874,79 @@ app.post("/api/analyze", upload.single("file"), async (req, res): Promise<any> =
     const avgCadence = session.avg_cadence || (cadenceRecords.length > 0
       ? Math.round(cadenceRecords.reduce((sum: number, r: any) => sum + r.cadence, 0) / cadenceRecords.length)
       : null);
+
+    // Extract RPE / Perceived Exertion from session or developer fields
+    let fitRpe: number | null = null;
+    const possibleRpeKeys = [
+      "perceived_exertion",
+      "rpe",
+      "perceived_exertion_rating",
+      "enhanced_perceived_exertion",
+      "perceivedExertion",
+      "total_feeling",
+      "feeling",
+      "rating",
+      "activity_feeling",
+      "subjective_effort"
+    ];
+
+    for (const key of possibleRpeKeys) {
+      if (session && session[key] !== undefined && session[key] !== null) {
+        const val = Number(session[key]);
+        if (!isNaN(val) && val > 0) {
+          fitRpe = val;
+          break;
+        }
+      }
+    }
+
+    if (fitRpe === null && activity) {
+      for (const key of possibleRpeKeys) {
+        if (activity[key] !== undefined && activity[key] !== null) {
+          const val = Number(activity[key]);
+          if (!isNaN(val) && val > 0) {
+            fitRpe = val;
+            break;
+          }
+        }
+      }
+    }
+
+    if (fitRpe === null && session && session.developer_fields) {
+      const devFields = Array.isArray(session.developer_fields) 
+        ? session.developer_fields 
+        : Object.values(session.developer_fields);
+      for (const df of devFields) {
+        const fieldObj = df as any;
+        if (fieldObj && fieldObj.name) {
+          const fieldNameLower = fieldObj.name.toLowerCase();
+          if (
+            fieldNameLower.includes("rpe") ||
+            fieldNameLower.includes("perceived") ||
+            fieldNameLower.includes("feeling") ||
+            fieldNameLower.includes("effort") ||
+            fieldNameLower.includes("rating") ||
+            fieldNameLower.includes("subjective")
+          ) {
+            const val = Number(fieldObj.value);
+            if (!isNaN(val) && val > 0) {
+              fitRpe = val;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (fitRpe !== null) {
+      if (fitRpe >= 6 && fitRpe <= 20) {
+        fitRpe = Math.round(Math.max(1, Math.min(10, ((fitRpe - 6) / 14) * 9 + 1)));
+      } else if (fitRpe > 20 && fitRpe <= 100) {
+        fitRpe = Math.round(Math.max(1, Math.min(10, (fitRpe / 100) * 10)));
+      } else if (fitRpe >= 1 && fitRpe <= 10) {
+        fitRpe = Math.round(fitRpe);
+      }
+    }
 
     // Downsample records to 300 points for efficient charting
     const chartRecords = downsample(processedRecords, 300);
@@ -470,6 +1071,8 @@ Be encouraging, realistic, and highly educational. Break down your coachingInsig
         avgPower,
         maxPower,
         avgCadence,
+        rpe: fitRpe,
+        perceivedExertion: fitRpe,
       },
       gpsPath,
       records: chartRecords,
@@ -479,19 +1082,22 @@ Be encouraging, realistic, and highly educational. Break down your coachingInsig
     };
 
     // Store in backend database
-    addOrUpdateDbActivity(activityRecord);
+    const saveResult = addOrUpdateDbActivity(activityRecord);
+    const finalActivity = saveResult.savedActivity || activityRecord;
 
     // 5. Return processed metrics + AI insights + saved database object
     res.json({
       success: true,
-      activity: activityRecord,
-      sport,
-      startTime,
-      summary: activityRecord.summary,
-      gpsPath,
-      records: chartRecords,
-      aiAnalysis,
-      aiEnabled: hasAi,
+      isDuplicate: saveResult.isDuplicate || false,
+      message: saveResult.isDuplicate ? "Arquivo carregado. Verifique o histórico de treinos." : "Treino importado com sucesso.",
+      activity: finalActivity,
+      sport: finalActivity.sport,
+      startTime: finalActivity.startTime,
+      summary: finalActivity.summary,
+      gpsPath: finalActivity.gpsPath,
+      records: finalActivity.records,
+      aiAnalysis: finalActivity.aiAnalysis,
+      aiEnabled: finalActivity.aiEnabled,
     });
   } catch (error: any) {
     console.error("Analysis route error:", error);
@@ -1047,21 +1653,48 @@ app.post("/api/generate-training-plan", async (req, res): Promise<any> => {
 Generate a highly detailed, personalized running training plan for this athlete.
 
 ATHLETE PROFILE:
-- Name: ${athleteProfile?.name || "Atleta"}
+
+[CAMADA 1 — IDENTIDADE BIOLÓGICA E PERMANENTE DO ATLETA]
+- Name: ${athleteProfile?.name || athleteProfile?.firstName || "Atleta"}
 - Age: ${athleteProfile?.age || "Not specified"} years old
 - Gender: ${athleteProfile?.gender || "Not specified"}
-- Weight: ${athleteProfile?.weightCurrentKg || athleteProfile?.weight || "Not specified"} kg
 - Height: ${athleteProfile?.heightCm || athleteProfile?.height || "Not specified"} cm
-- Goal/Objective: ${athleteProfile?.objective || athleteProfile?.trainingGoal || "General Fitness"}
-- Years running: ${athleteProfile?.yearsRunning || "Not specified"}
-- Weekly training days: ${athleteProfile?.weeklyTrainingDays || "3"} days/week
-- Longest run: ${athleteProfile?.longestRunKm || "Not specified"} km
-- Current week volume: ${athleteProfile?.currentWeekKm || "Not specified"} km
+- Current Weight: ${athleteProfile?.weightCurrentKg || athleteProfile?.weight || "Not specified"} kg
+- Experience Level (Nível de Experiência): ${athleteProfile?.experienceLevel || athleteProfile?.fitnessLevel || "intermediario"}
+- Sports History / Background: ${Array.isArray(athleteProfile?.sportsHistoryList) ? athleteProfile.sportsHistoryList.join(", ") : athleteProfile?.sportsHistory || "Nenhum informado"}
+- Structured Injuries / Permanent Limitations: ${Array.isArray(athleteProfile?.structuredInjuries) && athleteProfile.structuredInjuries.length > 0 ? JSON.stringify(athleteProfile.structuredInjuries) : athleteProfile?.injuries || athleteProfile?.limitations || "Nenhuma"}
+- Clinical Conditions / Illnesses: ${Array.isArray(athleteProfile?.clinicalConditions) ? athleteProfile.clinicalConditions.join(", ") : "Nenhuma"}
+- Diet Type (Tipo de Dieta): ${athleteProfile?.dietType || "onivora"}
+- Profession / Occupation: ${athleteProfile?.profession || "Not specified"}
+- Night Shift Work (Trabalho Noturno): ${athleteProfile?.nightShiftWork ? "YES (Ajustar janela de recuperação do SNC)" : "NO"}
+- Young Children at Home (Filhos Pequenos): ${athleteProfile?.youngChildren ? "YES (Ajustar margem de descanso estressante)" : "NO"}
+- Long-Term Coach Memory (Memória Profunda do Treinador): ${Array.isArray(athleteProfile?.longTermCoachMemory) ? athleteProfile.longTermCoachMemory.join("; ") : athleteProfile?.coachMemoryNotes || "Atleta focado em consistência e evolução progressiva sem sobrecarga."}
+
+[CAMADA 2 — OBJETIVOS E ESTRATÉGIA (RESPONDE: "PARA ONDE ESTAMOS INDO?")]
+- Objetivos Esportivos e Pessoais Selecionados: ${Array.isArray(athleteProfile?.multipleGoals) && athleteProfile.multipleGoals.length > 0 ? athleteProfile.multipleGoals.join("; ") : athleteProfile?.objective || athleteProfile?.trainingGoal || "Fitness Geral & Saúde"}
+- Prova Alvo (Target Race): ${athleteProfile?.currentTargetRaceName || "Nenhuma prova específica"}
+- Data da Prova Alvo (Target Race Date): ${athleteProfile?.currentTargetRaceDate || "Não definida"}
+- Tempo Alvo Desejado (Target Time Goal): ${athleteProfile?.targetTimeGoal || "Não definido"}
+- Meta de Peso (Target Weight Goal): ${athleteProfile?.targetWeightKg || athleteProfile?.weightGoalKg || "Manter peso atual"} kg
+- Motivação Primária (Primary Motivation): ${athleteProfile?.primaryMotivation || "Performance & Saúde"}
+- Estilo de Treinador Desejado (Coach Style): ${athleteProfile?.coachStyle || "equilibrado"}
+- Comunicação do Treinador (Coach Communication): ${athleteProfile?.coachCommunication || "tecnica"}
+- Primary Goal Category: ${athleteProfile?.objective || athleteProfile?.trainingGoal || "General Fitness"}
+- Weekly training days available count: ${athleteProfile?.weeklyTrainingDays || "3"} days/week
+- Longest run distance history: ${athleteProfile?.longestRunKm || "Not specified"} km
 - Personal Bests: 5k: ${athleteProfile?.best5k || "N/A"} | 10k: ${athleteProfile?.best10k || "N/A"} | Half Marathon: ${athleteProfile?.bestHalfMarathon || "N/A"}
-- Estimated Current Pace: ${athleteProfile?.estimatedPaceCurrent || "Not specified"} min/km
 - Rest Day preference: ${athleteProfile?.restDay || "Segunda-feira"}
 - Long Run preference: ${athleteProfile?.longRunDay || "Domingo"}
-- Injuries/Limitations: ${athleteProfile?.injuries || athleteProfile?.limitations || "None"}
+
+[CAMADA 3 — RESTRIÇÕES E VIABILIDADE (RESPONDE: "O QUE É POSSÍVEL?")]
+- Dias da Semana Específicos Disponíveis: ${Array.isArray(athleteProfile?.availableDays) && athleteProfile.availableDays.length > 0 ? athleteProfile.availableDays.join(", ") : "Todos os dias disponíveis conforme preferências"}
+- Duração Máxima por Sessão de Treino: ${athleteProfile?.availableTimePerWorkout || "60 minutos"}
+- Horário Preferido do Dia: ${athleteProfile?.preferredTimeOfDay || "Manhã"}
+- Terrenos Predominantes Disponíveis: ${Array.isArray(athleteProfile?.preferredTerrain) && athleteProfile.preferredTerrain.length > 0 ? athleteProfile.preferredTerrain.join(", ") : "Rua / Asfalto"}
+- Acesso a Academia (Gym Access): ${athleteProfile?.hasGymAccess ? "SIM" : "NÃO"}
+- Acesso a Esteira (Treadmill Access): ${athleteProfile?.hasTreadmillAccess || (Array.isArray(athleteProfile?.preferredTerrain) && athleteProfile.preferredTerrain.includes("Esteira")) ? "SIM" : "NÃO"}
+- Acesso a Pista de Atletismo (Track Access): ${athleteProfile?.hasTrackAccess || (Array.isArray(athleteProfile?.preferredTerrain) && athleteProfile.preferredTerrain.includes("Pista de Atletismo")) ? "SIM" : "NÃO"}
+- Equipamentos para Fortalecimento: ${Array.isArray(athleteProfile?.equipmentsList) && athleteProfile.equipmentsList.length > 0 ? athleteProfile.equipmentsList.join(", ") : "Nenhum / Calistenia com peso corporal"}
 - Additional notes: ${athleteProfile?.notes || "None"}
 
 CURRENT DAY ATHLETE STATE / DAILY BIOMETRICS:
@@ -1072,6 +1705,7 @@ CURRENT DAY ATHLETE STATE / DAILY BIOMETRICS:
 - Rest Heart Rate: ${dailyMetrics?.restingHeartRate || "Not specified"} bpm
 - HRV (Heart Rate Variability): ${dailyMetrics?.hrv || "Not specified"} ms
 - Readiness Score calculated locally: ${readiness?.score || "Not specified"}/100 (${readiness?.status || "Normal"})
+- Confidence Level of Decision (Nível de Confiança): ${readiness?.decisionQualityLabel || "Alta"} (${readiness?.confidenceScore || 100}%)
 
 HISTORICAL TRAINING METRICS (from parsed activities or defaults):
 - Week distance: ${trainingHistory?.weekDistanceKm || "0"} km
@@ -1086,18 +1720,58 @@ HISTORICAL TRAINING METRICS (from parsed activities or defaults):
       model: "gemini-3.6-flash",
       contents: prompt,
       config: {
-        systemInstruction: `You are an elite endurance sports coach, specialized in running physiology, CTL/ATL metrics, and customized periodization (including base building, VO2 Max development, speed, and recovery).
+        systemInstruction: `You are an elite endurance sports coach, specialized in running physiology, CTL/ATL metrics, biomechanics, and customized periodization.
 Using the provided Athlete Profile, Current State (Readiness), and Training History, generate a professional, periodized 1-week training schedule (represented as 1 cycle and 1 week containing scheduled workouts).
 
-Take into account:
-1. If they have an injury or low Readiness (e.g. status "recover" or "reduce"), substitute intensity with "recovery", "rest", "mobility", or lower volume.
-2. Respect their weekly training days (if they train 3 days, only schedule 3 run workouts, and set other days to "rest", "mobility" or dedicated strength training).
-3. Respect their preferred rest day and long run day.
-4. Scale paces and intervals based on their Personal Bests if provided. If the athlete is a beginner and did not specify Resting Heart Rate (FC Repouso), Max Heart Rate (FC Máxima), Personal Bests (PBs), or Estimated Current Pace, do NOT mandate strict target zone heart rates or paces. Instead, describe the training intensity using RPE (Rate of Perceived Exertion, e.g., "Esforço 3-4/10", "Trote super leve e confortável") and time duration, letting the athlete adapt comfortably without technical pressure. Explain in the descriptions/instructions that the coach will learn and estimate their zones as they report training data!
-5. For each scheduled run workout (aerobic_base, threshold, vo2max, long_run), you MUST include running drills (educativos de técnica de corrida, e.g., Skip Alto, Skip Baixo, Anfersen, Soldadinho) in the description or as a specific sub-step of the Warmup to improve stride efficiency and posture.
-6. You MUST schedule at least one dedicated Strength Training session ("Treino de Força Funcional para Corrida", intent: "strength"). For athletes training 5, 6, or 7 days, schedule this strength session on an easy run day or replace one easy run day to guarantee they receive lower limb and core reinforcement to prevent common injuries.
-7. For each scheduled workout, provide a list of structured steps (Warmup, Main set intervals, Cooldown) with exact durations in seconds and physiological intensity tags (e.g., "Z2 Easy / RPE 3-4", "Z4 Threshold / RPE 7-8", "Z5 Max effort / RPE 9-10").
-8. Always write step names explicitly (e.g., "Aquecimento + Educativos de Técnica de Corrida" for warmups) and include descriptions naming the exact exercises (e.g., Skip Alto, Anfersen, Soldadinho, or glute activation) so the athlete can easily see and perform them. Do NOT omit them.
+O TREINADOR DEVE ADAPTAR TODO O SEU COMPORTAMENTO (NÃO APENAS O TEXTO) COM BASE NAS SEGUINTES REGRAS MULTICAMADAS:
+
+1. CAMADA 1 — IDENTIDADE SILENCIOSA, BIOMECÂNICA E MEMÓRIA PROFUNDA DO TREINADOR:
+   - MEMÓRIA DO TREINADOR: O perfil não é um formulário passivo. É a MEMÓRIA ATIVA de longo prazo do Treinador. Leve em conta todas as memórias do atleta (ex: trabalho noturno, filhos pequenos, histórico de distensão em panturrilha, aversão a esteira, horário matutino preferido, desânimo se ficar 3 dias parado, etc.).
+   - PESO CORPORAL E CARGA MECÂNICA / IMPACTO ARTICULAR:
+     * Compare um atleta de 58 kg vs 92 kg: Um atleta de 92 kg (ou IMC > 27) sofre CARGA MECÂNICA E IMPACTO ARTICULAR drasticamente maiores a cada passada.
+     * Para atletas com maior peso/IMC: limite rigorosamente a progressão de volume semanal (máx 5% a 7% por semana), limite a distância máxima do longão, imponha fortalecimento obrigatório para estabilização articular (joelho/quadríceps/glúteo/tornozelo), dê preferência a pisos macios ou esteira para absorção de impacto, e estenda o tempo de regeneração.
+   - IMPACTO DA DIETA (ex: VEGETARIANA / VEGANA / LOW CARB):
+     * Dieta Vegetariana/Vegana: O treinador aumenta a atenção para a janela de ingestão proteica e síntese muscular, estende o tempo de recuperação tecidual (+10% a +15% de margem) e monitora a fadiga neuromuscular com maior rigor no pós-treino.
+   - NÍVEL DE EXPERIÊNCIA (INICIANTE vs AVANÇADO):
+     * Atleta Iniciante: Requer mais educativos de corrida (Skip, Anfersen) no aquecimento, explicações detalhadas das passadas, menor intensidade e orientações claras de execução.
+     * Atleta Avançado: Exige métricas diretas, faixas exatas de pace (min/km), zonas de FC e instruções técnicas sintéticas, sem explicações redundantes.
+   - LESÕES E LIMITAÇÕES (ex: Dor Patelofemoral, Tendinite de Aquiles, Canelite):
+     * A lesão NÃO serve apenas para bloquear um exercício. Ela altera volume (-20% a -50%), reduz intensidade (substitui tiros Z5 por Z1/Z2), reduz treinos em descidas acentuadas, aumenta fortalecimento direcionado e adiciona educativos específicos de postura e absorção de impacto.
+
+2. CAMADA 2 — PERSONALIDADE E ESTILO DE COMUNICAÇÃO CONFORME A MOTIVAÇÃO:
+   - ATLETA COMPETITIVO / PERFORMANCE (primaryMotivation = "competicao"):
+     * PERSONALIDADE DO TREINADOR: Objetivo, focado em métricas e direto ao ponto. Fala menos, cobra foco no pace/splits/zonas, mostra números e exige disciplina. Zero mensagens clichês de vendas ou floreios motivacionais.
+   - ATLETA SAÚDE / LONGEVIDADE (primaryMotivation = "saude"):
+     * PERSONALIDADE DO TREINADOR: Encorajador, acolhedor e focado em aderência sustentável. Elogia a consistência, evita comparações com outros atletas, elimina a pressão e foca no bem-estar fisiológico de longo prazo.
+   - ATLETA PERDA DE PESO / ESTÉTICA (primaryMotivation = "estetica" / "perder_peso"):
+     * PERSONALIDADE DO TREINADOR: Focado na zona de oxidação de gorduras (Z2), na preservação muscular e na consistência sem julgar o atleta.
+
+3. CAMADA 3 — RESTRIÇÕES E VIABILIDADE ("O QUE É POSSÍVEL?"):
+   - Duração da Sessão: Respeite rigorosamente a limitação de tempo do atleta (availableTimePerWorkout).
+   - Terreno e Infraestrutura:
+     * Sem Pista de Atletismo: Prescreva tiros por tempo (ex: 6x 3min Z4).
+     * Com Pista de Atletismo: Prescreva tiros por distância (ex: 10x 400m Z4).
+     * Sem Academia: Prescreva fortalecimento calistênico com peso corporal / mini bands.
+
+4. CAMADA 4 — ESTADO ATUAL E DEGRADAÇÃO ELEGANTE / NÍVEL DE CONFIANÇA:
+   - PRIORIDADE ABSOLUTA: Se o atleta dormiu mal, está fadigado ou relatou dor no Check-in, O TREINADOR ALTERA O TREINO IMEDIATAMENTE para regenerativo leve Z1/Z2 ou descanso.
+   - DEGRADAÇÃO ELEGANTE SEM SENSORES: Se faltarem dados de sensores (sem Garmin, sem HRV, sem Body Battery), O MOTOR NÃO QUEBRA E NUNCA INVENTA VALORES FALSOS! Ele redistribui os pesos para a Percepção Subjetiva do Atleta, ajusta o Nível de Confiança (Alta, Moderada, Baixa) e o treinador avisa com transparência sobre a confiança da decisão.
+
+5. OBRIGATÓRIO — FAIXA DE PACE POR ZONA (MIN/KM):
+   - Sempre que prescrever o treino por Zona de Frequência Cardíaca (Z1, Z2, Z3, Z4, Z5) ou RPE, INCLUA a faixa estimada de PACE em min/km (ex: "Z2 / RPE 3-4 (Pace Alvo: 05:30 - 05:55 min/km)").
+
+6. ESTRUTURA DO TREINO E EDUCATIVOS DE CORRIDA:
+   - HIERARQUIA DE ESTÍMULOS POR OBJETIVO:
+     * 5k / 10k: Priorize VO2 máx (Intervalados / Tiros) + Limiar + Base Aeróbica Z2.
+     * Meia Maratona: Priorize Tempo Run (Limiar) + Longão + Rodagem Z2 + Força.
+     * Maratona: Priorize Longão Progressivo Z2 + Volume Aeróbico Z2 + Tempo Run + Força.
+     * NUNCA prescreva a semana inteira com o mesmo tipo de treino (jamais repita "Tempo Run" em múltiplos dias seguidos). Diversifique os estímulos conforme a arquitetura fisiológica (Rodagem Z2, Longão, Fortalecimento Funcional, Descanso, Intervalado / Tempo Run).
+   - REGRAS ABSOLUTAS DE ESPAÇAMENTO:
+     * Nunca 2 estímulos máximos em dias consecutivos.
+     * Proteção do Longão: 24h-48h antes do Longão, prescreva apenas Z2 leve, mobilidade ou descanso.
+     * Após treino de alta intensidade (VO2 máx ou Limiar), o dia seguinte deve ser Z1/Z2, mobilidade ou descanso.
+   - Inclua educativos de técnica de corrida (Skip Alto, Anfersen, Soldadinho) nos aquecimentos das corridas.
+   - Agende pelo menos 1 sessão dedicada de Fortalecimento Funcional para Corrida.
 
 Return the result STRICTLY as a JSON object matching the following TypeScript structure:
 {
@@ -1248,6 +1922,50 @@ Return ONLY this JSON, with no other text, comments, markdown blocks, or surroun
   }
 });
 
+// Aetheris Official Microcycle Automatic Generation API Endpoint (Especificação Técnica Parte 7 / API Specs)
+app.post("/api/v1/microcycle/generate", (req, res): any => {
+  try {
+    const response = generateAetherisMicrocycle(req.body);
+    if (response.status === "error") {
+      return res.status(400).json(response);
+    }
+    return res.json(response);
+  } catch (error: any) {
+    console.error("Error in /api/v1/microcycle/generate:", error);
+    return res.status(500).json({
+      status: "error",
+      message: error?.message || "Internal server error generating microcycle decision."
+    });
+  }
+});
+
+// Aetheris Official Simulated Athlete Testing Suite Endpoint (Especificação Técnica Parte 8 / Sistema de Testes)
+app.post("/api/v1/simulation/suite", (req, res): any => {
+  try {
+    const suiteReport = runAetherisSimulationSuite();
+    return res.json({ success: true, report: suiteReport });
+  } catch (error: any) {
+    console.error("Error in /api/v1/simulation/suite:", error);
+    return res.status(500).json({
+      success: false,
+      error: error?.message || "Failed to run simulation suite."
+    });
+  }
+});
+
+app.post("/api/v1/simulation/run", (req, res): any => {
+  try {
+    const suiteReport = runAetherisSimulationSuite();
+    return res.json({ success: true, report: suiteReport });
+  } catch (error: any) {
+    console.error("Error in /api/v1/simulation/run:", error);
+    return res.status(500).json({
+      success: false,
+      error: error?.message || "Failed to run simulation."
+    });
+  }
+});
+
 // Endpoint for real-time sports science consultation with the AI Coach
 app.post("/api/coach-chat", async (req, res): Promise<any> => {
   try {
@@ -1276,27 +1994,37 @@ app.post("/api/coach-chat", async (req, res): Promise<any> => {
       parts: [{ text: message }]
     });
 
-    const systemInstruction = `Você é o Treinador Virtual de Performance Esportiva e Fisiologia do Exercício do aplicativo Aetheris Fit.
-Você auxilia corredores e ciclistas a otimizarem seus treinos de endurance, baseados em métricas de telemetria Garmin, carga semanal (CTL/ATL), percepção de esforço (RPE) e índice de prontidão física (readiness) coletado.
+    const systemInstruction = `Você é o Treinador Virtual de Performance Esportiva, Biomecânica e Fisiologia do Exercício do aplicativo Aetheris Fit.
+Você auxilia corredores e ciclistas a otimizarem seus treinos de endurance, baseados em métricas de telemetria Garmin, carga semanal (CTL/ATL), percepção de esforço (RPE) e índice de prontidão física (readiness).
 
-Perfil do Atleta atual com quem você está conversando:
-- Idade: ${athleteProfile?.age || "Não especificado"} anos
-- Peso: ${athleteProfile?.weight || "Não especificado"} kg
-- Altura: ${athleteProfile?.height || "Não especificado"} cm
+Perfil Completo e Memória do Atleta com quem você está conversando:
+- Idade: ${athleteProfile?.age || "Não especificado"} anos | Peso: ${athleteProfile?.weightCurrentKg || athleteProfile?.weight || "Não especificado"} kg | Altura: ${athleteProfile?.heightCm || athleteProfile?.height || "Não especificado"} cm
 - FC de Repouso: ${athleteProfile?.restingHeartRate || "60"} bpm | FC Máxima: ${athleteProfile?.maxHeartRate || "190"} bpm
-- Experiência: ${athleteProfile?.fitnessLevel || "intermediate"}
-- Objetivo: ${athleteProfile?.trainingGoal || "endurance"}
+- Experiência: ${athleteProfile?.experienceLevel || athleteProfile?.fitnessLevel || "iniciante"}
+- Objetivos Esportivos & Pessoais: ${Array.isArray(athleteProfile?.multipleGoals) && athleteProfile.multipleGoals.length > 0 ? athleteProfile.multipleGoals.join("; ") : athleteProfile?.objective || athleteProfile?.trainingGoal || "Saúde e Performance Geral"}
+- Dieta: ${athleteProfile?.dietType || "onivora"}
+- Motivação Primária: ${athleteProfile?.primaryMotivation || "saude"} (Competição, Saúde, Estética, Prazer)
+- Estilo do Treinador: ${athleteProfile?.coachStyle || "equilibrado"} | Comunicação: ${athleteProfile?.coachCommunication || "tecnica"}
+- Lesões Estruturais: ${Array.isArray(athleteProfile?.structuredInjuries) ? JSON.stringify(athleteProfile.structuredInjuries) : athleteProfile?.injuries || "Nenhuma"}
+- Memória Profunda do Atleta: ${Array.isArray(athleteProfile?.longTermCoachMemory) ? athleteProfile.longTermCoachMemory.join("; ") : athleteProfile?.coachMemoryNotes || "Sem notas prévias"}
 
-Histórico e Prontidão do Atleta hoje:
-- Índice de Prontidão (Readiness): ${readiness?.score || "80"}/100 [Status: ${readiness?.status || "READY"}]
+Estado Fisiológico e Prontidão de Hoje (Camada 4):
+- Pontuação de Prontidão (Readiness): ${readiness?.score || "80"}/100 [Status: ${readiness?.status || "READY"}]
+- Qualidade / Nível de Confiança da Decisão: ${readiness?.decisionQualityLabel || "Alta"} (${readiness?.confidenceScore || 100}%)
 - Quilometragem Semanal acumulada: ${trainingHistory?.weekDistanceKm || "0"} km
-- Quilometragem Mensal: ${trainingHistory?.monthDistanceKm || "0"} km
 
-Instruções para a conversa:
-1. Seja altamente profissional, amigável, encorajador e educativo. Use termos de ciência esportiva (como limiar de lactato, zonas de FC, CTL/ATL, economia de corrida, VO2 Max) mas explique de forma clara e acessível.
-2. Responda em Português do Brasil (PT-BR).
-3. Mantenha respostas focadas na fisiologia de corrida e ciclismo. Se o atleta relatar dores de lesão, oriente a buscar avaliação médica, mas sugira repouso ativo, mobilidade ou treinos regenerativos baseados nas diretrizes fisiológicas.
-4. Use formatação Markdown (negritos, bullet points) para deixar a resposta bonita e legível.`;
+REGRAS DE ADAPTAÇÃO DE PERSONALIDADE E COMPORTAMENTO DO TREINADOR:
+1. PERSONALIDADE E TOM DE VOZ (DITADOS PELA MOTIVAÇÃO E ESTILO):
+   - Atleta Competitivo (primaryMotivation = "competicao" / "performance"): Seja objetivo, direto ao ponto e focado em métricas e dados de ritmo/pace. Fale menos, cobre mais disciplina e mostre números (splits, zonas de FC, CTL/ATL). Zero enrolação e zero floreios.
+   - Atleta Saúde (primaryMotivation = "saude" / "longevidade"): Seja acolhedor, encorajador e focado na consistência de longo prazo. Elogie a aderência, evite comparações com outros corredores, reduza a pressão e foque no bem-estar sem cobranças excessivas de pace.
+   - Atleta Perda de Peso (primaryMotivation = "estetica" / "perder_peso"): Destaque a consistência da Zona 2 (oxidação de gorduras) e preservação de massa magra.
+2. CONSCIÊNCIA DE CARGA MECÂNICA E PESO CORPORAL:
+   - Peso elevado (>85 kg) implica maior impacto articular por passada. Respeite essa fragilidade biomecânica recomendando fortalecimento de joelho/glúteo/tornozelo, superfícies macias e rodagens progressivas sem choques de volume.
+3. ADAPTAÇÃO PARA DIETA VEGETARIANA / VEGANA:
+   - Se o atleta for vegetariano/vegano, leve em consideração a necessidade de atenção à janela proteica pós-treino e o tempo de síntese tecidual, oferecendo orientações fisiológicas sem julgamentos.
+4. NÍVEL DE CONFIANÇA TRANSPARENTE SEM INVENTAR VALORES:
+   - Se não houver dados de sensores (HRV/Body Battery), mencione com transparência a confiança da análise: "Nossa confiança hoje é [Moderada/Baixa] pois faltam dados de HRV/Garmin. A decisão baseia-se na sua percepção subjetiva."
+5. Mantenha as respostas em Português do Brasil (PT-BR) com formatação Markdown limpa e legível.`;
 
     const response = await aiClient.models.generateContent({
       model: "gemini-3.6-flash",
