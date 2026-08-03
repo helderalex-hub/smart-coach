@@ -78,31 +78,43 @@ export default function App() {
 
   
   // User Authentication & Multi-user state
-  const [currentUser, setCurrentUser] = useState<UserAccount | null>({
-    id: "usr_helder_alex",
-    email: "helderalex@gmail.com",
-    firstName: "Helder",
-    lastName: "Alex",
-    role: "athlete",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    consentGdpr: true,
-    consentTimestamp: new Date().toISOString(),
-    termsVersion: "1.0",
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
+    const savedUser = localStorage.getItem("fit_current_user_account");
+    if (savedUser) {
+      try {
+        return JSON.parse(savedUser);
+      } catch (e) {}
+    }
+    return {
+      id: "usr_helder_alex",
+      email: "helderalex@gmail.com",
+      firstName: "Helder",
+      lastName: "Alex",
+      role: "athlete",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      consentGdpr: true,
+      consentTimestamp: new Date().toISOString(),
+      termsVersion: "1.0",
+    };
   });
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
-  // Restore current user session from token if available
+  // Restore current user session from token or stored user ID if available
   useEffect(() => {
     const token = localStorage.getItem("auth_token");
-    if (token) {
-      fetch("/api/auth/me", {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+    const storedUserId = localStorage.getItem("user_id");
+    if (token || storedUserId) {
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      if (storedUserId) headers["x-user-id"] = storedUserId;
+
+      fetch("/api/auth/me", { headers })
         .then((res) => res.json())
         .then((data) => {
           if (data.success && data.user) {
             setCurrentUser(data.user);
+            localStorage.setItem("fit_current_user_account", JSON.stringify(data.user));
           }
         })
         .catch((err) => console.error("Session check error:", err));
@@ -138,6 +150,9 @@ export default function App() {
   const handleUserChanged = (user: UserAccount | null, token: string | null) => {
     setCurrentUser(user);
     if (user) {
+      localStorage.setItem("fit_current_user_account", JSON.stringify(user));
+      if (user.id) localStorage.setItem("user_id", user.id);
+      if (token) localStorage.setItem("auth_token", token);
       const fname = user.firstName || "Helder";
       const lname = user.lastName || "Alex";
       const fullName = `${fname} ${lname}`.trim();

@@ -113,8 +113,47 @@ function saveUsersDb(users: StoredUser[]) {
   }
 }
 
-// Active sessions map (token -> session)
-const activeSessions = new Map<string, { userId: string; expiresAt: number }>();
+const SESS_FILE = path.join(DB_DIR, "sessions_db.json");
+
+function getSessionsDb(): Map<string, { userId: string; expiresAt: number }> {
+  const map = new Map<string, { userId: string; expiresAt: number }>();
+  try {
+    if (fs.existsSync(SESS_FILE)) {
+      const raw = fs.readFileSync(SESS_FILE, "utf-8");
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        const now = Date.now();
+        list.forEach((item: any) => {
+          if (item.token && item.userId && item.expiresAt > now) {
+            map.set(item.token, { userId: item.userId, expiresAt: item.expiresAt });
+          }
+        });
+      }
+    }
+  } catch (err) {
+    console.error("Error reading sessions_db.json:", err);
+  }
+  return map;
+}
+
+function saveSessionsDb(sessionsMap: Map<string, { userId: string; expiresAt: number }>) {
+  try {
+    if (!fs.existsSync(DB_DIR)) {
+      fs.mkdirSync(DB_DIR, { recursive: true });
+    }
+    const array = Array.from(sessionsMap.entries()).map(([token, val]) => ({
+      token,
+      userId: val.userId,
+      expiresAt: val.expiresAt,
+    }));
+    fs.writeFileSync(SESS_FILE, JSON.stringify(array, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error writing to sessions_db.json:", err);
+  }
+}
+
+// Active sessions map (token -> session) - loaded from disk
+const activeSessions = getSessionsDb();
 
 function validatePasswordStrength(password: string): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
@@ -442,6 +481,7 @@ app.post("/api/auth/register", (req, res) => {
     const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
     activeSessions.set(token, { userId, expiresAt });
+    saveSessionsDb(activeSessions);
 
     res.json({
       success: true,
@@ -478,6 +518,7 @@ app.post("/api/auth/login", (req, res) => {
     const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
     activeSessions.set(token, { userId: user.id, expiresAt });
+    saveSessionsDb(activeSessions);
 
     res.json({
       success: true,
@@ -492,19 +533,29 @@ app.post("/api/auth/login", (req, res) => {
 
 app.get("/api/auth/me", (req, res) => {
   try {
+    let userId = "";
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Não autenticado." });
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.split(" ")[1];
+      const session = activeSessions.get(token);
+      if (session && session.expiresAt >= Date.now()) {
+        userId = session.userId;
+      } else if (session) {
+        activeSessions.delete(token);
+        saveSessionsDb(activeSessions);
+      }
     }
-    const token = authHeader.split(" ")[1];
-    const session = activeSessions.get(token);
-    if (!session || session.expiresAt < Date.now()) {
-      if (session) activeSessions.delete(token);
-      return res.status(401).json({ error: "Sessão expirada." });
+
+    if (!userId && req.headers["x-user-id"]) {
+      userId = String(req.headers["x-user-id"]);
+    }
+
+    if (!userId) {
+      return res.status(401).json({ error: "Não autenticado ou sessão expirada." });
     }
 
     const users = getUsersDb();
-    const user = users.find((u) => u.id === session.userId);
+    const user = users.find((u) => u.id === userId);
     if (!user) {
       return res.status(404).json({ error: "Usuário não encontrado." });
     }
@@ -520,6 +571,7 @@ app.post("/api/auth/logout", (req, res) => {
   if (authHeader && authHeader.startsWith("Bearer ")) {
     const token = authHeader.split(" ")[1];
     activeSessions.delete(token);
+    saveSessionsDb(activeSessions);
   }
   res.json({ success: true, message: "Sessão encerrada com segurança." });
 });
@@ -1216,12 +1268,19 @@ Be encouraging, realistic, and highly educational. Break down your coachingInsig
 
 // Local fallback generator for training plans when Gemini API key is missing or invalid
 function generateLocalTrainingPlan(athleteProfile: any, dailyMetrics: any, trainingHistory: any, readiness: any) {
-  const name = athleteProfile?.name || "Atleta";
+  const name = athleteProfile?.name || athleteProfile?.firstName || "Atleta";
   const goalType = athleteProfile?.trainingGoal || athleteProfile?.objective || "general";
-  const fitnessLevel = athleteProfile?.fitnessLevel || "intermediate";
-  const daysCount = athleteProfile?.weeklyTrainingDays || 4;
-  const restDay = athleteProfile?.restDay || "Segunda-feira";
+  const fitnessLevel = athleteProfile?.experienceLevel || athleteProfile?.fitnessLevel || "intermediate";
+  const restDay = athleteProfile?.restDay || "Quinta-feira";
   const longRunDay = athleteProfile?.longRunDay || "Domingo";
+  
+  const availableDaysList: string[] = Array.isArray(athleteProfile?.availableDays) && athleteProfile.availableDays.length > 0 
+    ? athleteProfile.availableDays 
+    : ["Segunda-feira", "Terça-feira", "Quarta-feira", "Sexta-feira", "Sábado", "Domingo"];
+
+  const isDoubleSession = Boolean(athleteProfile?.doubleSessionsAllowed || athleteProfile?.sessionsPerDay === 2);
+  const t1Min = athleteProfile?.turno1TimeMinutes || athleteProfile?.availableTimePerWorkout || 50;
+  const t2Min = athleteProfile?.turno2TimeMinutes || athleteProfile?.timePerShiftMinutes || 30;
 
   // Define pace based on fitness level or estimated pace
   const pace = athleteProfile?.estimatedPaceCurrent || (
@@ -1258,250 +1317,44 @@ function generateLocalTrainingPlan(athleteProfile: any, dailyMetrics: any, train
       durationScale = 1.0;
       overviewTitle = "Adaptação & Base I";
       overviewLoad = "Moderada Leve";
-      if (goalType === "5k" || goalType === "10k" || goalType === "weight_loss") {
-        overviewObjective = "Estabelecer a rotina de treinos e preparar músculos e tendões para as cargas futuras.";
-        overviewKey = "Treino de ritmo de quarta-feira (introdução gradual)";
-        overviewAttention = "Foque na postura correta de corrida e mantenha as rodagens fáceis bem leves.";
-      } else {
-        overviewObjective = "Construir a base aeróbica inicial e acostumar o corpo com a consistência de corrida.";
-        overviewKey = "Longão de Domingo (ritmo confortável)";
-        overviewAttention = "Evite correr com pressa. Guarde energia para completar a distância sugerida.";
-      }
+      overviewObjective = "Estabelecer a rotina de treinos e preparar músculos e tendões para as cargas futuras.";
+      overviewKey = "Treino de ritmo e volume controlado";
+      overviewAttention = "Foque na postura correta de corrida e mantenha as rodagens fáceis bem leves.";
     } else if (w === 2) {
       phase = "Base II & Carga";
       durationScale = 1.15;
       overviewTitle = "Base II & Progressão";
       overviewLoad = "Moderada";
-      if (goalType === "5k" || goalType === "10k" || goalType === "weight_loss") {
-        overviewObjective = "Progredir o volume das rodagens e elevar suavemente o estresse cardiovascular.";
-        overviewKey = "Intervalados de VO2 Máx de quarta-feira";
-        overviewAttention = "Tente manter os tiros em um ritmo firme, sem se esgotar completamente na primeira série.";
-      } else {
-        overviewObjective = "Expandir a capacidade volumétrica e consolidar a resistência musculoesquelética.";
-        overviewKey = "Longão progressivo de Domingo";
-        overviewAttention = "Se o clima estiver quente, capriche na hidratação antes, durante e após o treino longo.";
-      }
+      overviewObjective = "Progredir o volume das rodagens e elevar suavemente o estresse cardiovascular.";
+      overviewKey = "Intervalados de VO2 Máx ou Limiar";
+      overviewAttention = "Tente manter os tiros em um ritmo firme sem se esgotar na primeira série.";
     } else if (w === 3) {
       phase = "Pico & Intensidade";
       durationScale = 1.30;
       overviewTitle = "Pico de Volume & Carga";
       overviewLoad = "Moderada Alta";
-      if (goalType === "5k" || goalType === "10k" || goalType === "weight_loss") {
-        overviewObjective = "Estímulo fisiológico máximo de velocidade e tolerância ao lactato para ganho de performance.";
-        overviewKey = "Tiros rápidos com recuperação reduzida na quarta-feira";
-        overviewAttention = "Se sinta forte! A postura e a frequência de passadas são essenciais quando bate a fadiga.";
-      } else {
-        overviewObjective = "Maior volume do ciclo para testar o ritmo e a resistência mental do atleta.";
-        overviewKey = "Longão de Domingo (maior distância)";
-        overviewAttention = "Não tente acelerar o longão. O segredo é passar tempo ativo na Zona 2.";
-      }
+      overviewObjective = "Estímulo fisiológico máximo de velocidade e tolerância ao lactato para ganho de performance.";
+      overviewKey = "Sessão principal de tiros e Longão semanal";
+      overviewAttention = "Mantenha a postura e frequência de passadas quando bater a fadiga.";
     } else {
       phase = "Recuperação & Descarga";
       durationScale = 0.70;
       overviewTitle = "Recuperação Ativa & Descarga";
       overviewLoad = "Leve";
-      if (goalType === "5k" || goalType === "10k" || goalType === "weight_loss") {
-        overviewObjective = "Reduzir o volume agudo de treino para permitir a supercompensação biológica e muscular.";
-        overviewKey = "Treino regenerativo super leve de quarta-feira";
-        overviewAttention = "Esta semana é para descansar e assimilar os ganhos. Nada de treinar forte.";
-      } else {
-        overviewObjective = "Consolidar as adaptações cardiovasculares acumuladas e restaurar o tônus muscular.";
-        overviewKey = "Longão de volume reduzido no Domingo";
-        overviewAttention = "Aproveite para dormir um pouco mais e investir tempo em mobilidade e alongamentos.";
-      }
-    }
-
-    // Determine training days for this week
-    const remainingDays = weekdays.filter(d => d !== restDay && d !== longRunDay);
-    let selectedTrainingDays: string[] = [];
-    if (daysCount === 1) {
-      selectedTrainingDays = [];
-    } else if (daysCount === 2) {
-      selectedTrainingDays = [remainingDays[2]];
-    } else if (daysCount === 3) {
-      selectedTrainingDays = [remainingDays[1], remainingDays[3]];
-    } else if (daysCount === 4) {
-      selectedTrainingDays = [remainingDays[0], remainingDays[2], remainingDays[3]];
-    } else if (daysCount === 5) {
-      selectedTrainingDays = [remainingDays[0], remainingDays[1], remainingDays[2], remainingDays[3]];
-    } else {
-      selectedTrainingDays = remainingDays;
-    }
-
-    const getWorkoutForDay = (day: string, isLongRun: boolean, isQuality: boolean) => {
-      if (isLongRun) {
-        let duration = goalType === "5k" ? 50 :
-                       goalType === "10k" ? 70 :
-                       goalType === "half_marathon" ? 95 :
-                       goalType === "marathon" ? 140 : 60;
-        
-        duration = Math.round(duration * durationScale);
-
-        return {
-          name: w === 4 ? "Longão de Descarga" : "Longão Progressivo Z2",
-          intent: "long_run",
-          durationMinutes: duration,
-          description: "Mantenha um ritmo confortável, em Zona 2. Você deve conseguir conversar em frases completas durante a maior parte do treino. Nos quilômetros finais, aumente o ritmo apenas se estiver se sentindo bem.",
-          objective: "Desenvolver resistência aeróbica e adaptação musculoesquelética de longa duração.",
-          observations: ["mantenha ritmo confortável", "conversa em frases completas", "foco em Zona 2"],
-          ifTired: "Reduza o volume em 15-20 minutos e termine caminhando se necessário.",
-          steps: [
-            {
-              name: "Aquecimento e Educativos de Corrida",
-              durationSeconds: 900,
-              intensity: "Z1 Leve / RPE 2-3",
-              description: "Trote leve e progressivo seguido de exercícios educativos (Skip Alto e Soldadinho) para coordenação motora.",
-              stepType: "warmup"
-            },
-            {
-              name: "Corrida Contínua de Endurance",
-              durationSeconds: (duration - 20) * 60,
-              intensity: "Z2 Confortável",
-              description: `Ritmo constante visando adaptação de tendões e capilarização muscular. Alvo: ~${pace}/km.`,
-              stepType: "main_set"
-            },
-            {
-              name: "Desaquecimento",
-              durationSeconds: 300,
-              intensity: "Z1 regenerativo",
-              description: "Caminhada lenta para baixar os batimentos cardíacos gradativamente.",
-              stepType: "cooldown"
-            }
-          ]
-        };
-      }
-
-      if (isQuality) {
-        if (goalType === "5k" || goalType === "10k" || goalType === "weight_loss") {
-          let duration = Math.round(45 * (w === 4 ? 0.75 : durationScale));
-          let reps = w === 1 ? 4 : w === 2 ? 6 : w === 3 ? 8 : 4;
-          return {
-            name: "Intervalados de VO2 Máx (Tiros de 400m)",
-            intent: "vo2max",
-            durationMinutes: duration,
-            description: "Sessão de alta intensidade para expandir o teto de captação de oxigênio e tolerância ao lactato.",
-            objective: "Expandir o teto de captação de oxigênio (VO2 Máx) e tolerância ao lactato.",
-            observations: ["esforço forte nos tiros", "manter a postura alta", "recuperação ativa no trote"],
-            ifTired: "Aumente o tempo de recuperação entre os tiros para 2 minutos ou reduza o número de repetições pela metade.",
-            steps: [
-              {
-                name: "Aquecimento, Educativos e Acelerações",
-                durationSeconds: 900,
-                intensity: "Z2 Progressivo",
-                description: "10 min de trote leve + 3 min de educativos (Skip Alto, Hop) + 2 tiros de aceleração de 50m para ativação neuromuscular.",
-                stepType: "warmup"
-              },
-              {
-                name: "Tiros Rápidos de 400m",
-                durationSeconds: 90,
-                intensity: "Z5 Esforço Forte / RPE 9",
-                description: "Velocidade de tiro submáximo.",
-                stepType: "main_set",
-                repetitions: reps,
-                recoverySeconds: 90,
-                instruction: "Foque na postura alta, passada rápida e recuperação completa no trote."
-              },
-              {
-                name: "Trote de Descompressão",
-                durationSeconds: 600,
-                intensity: "Z1 Regenerativo",
-                description: "Corrida extremamente leve para remoção do lactato acumulado.",
-                stepType: "cooldown"
-              }
-            ]
-          };
-        } else {
-          let duration = Math.round(50 * (w === 4 ? 0.75 : durationScale));
-          let mainSeconds = w === 1 ? 900 : w === 2 ? 1200 : w === 3 ? 1500 : 900;
-          return {
-            name: "Tempo Run de Ritmo de Limiar (Lactato)",
-            intent: "threshold",
-            durationMinutes: duration,
-            description: "Treino chave de ritmo para melhorar a velocidade de cruzeiro e eficiência metabólica sob fadiga.",
-            objective: "Melhorar o limiar de lactato e a velocidade de cruzeiro sob fadiga.",
-            observations: ["ritmo firme e constante", "conversa difícil (frases curtas)", "FC estável na Zona 4"],
-            ifTired: "Divida o bloco contínuo em 2 partes de igual duração com 2 minutos de caminhada entre elas.",
-            steps: [
-              {
-                name: "Trote de Aquecimento e Educativos",
-                durationSeconds: 900,
-                intensity: "Z2 Confortável",
-                description: "Aquecimento progressivo leve (10 min) seguido de educativos de técnica (Skip Baixo e Dribbling) para coordenação.",
-                stepType: "warmup"
-              },
-              {
-                name: "Bloco Contínuo de Limiar",
-                durationSeconds: mainSeconds,
-                intensity: "Z4 Ritmo Firme / RPE 7-8",
-                description: "Ritmo de esforço controlado porém desconfortável.",
-                stepType: "main_set",
-                instruction: "Mantenha o ritmo firme constante sem deixar a frequência cardíaca disparar descontroladamente."
-              },
-              {
-                name: "Trote de Desaquecimento",
-                durationSeconds: 600,
-                intensity: "Z1 Muito Leve",
-                description: "Resfriamento fisiológico.",
-                stepType: "cooldown"
-              }
-            ]
-          };
-        }
-      }
-
-      // Default aerobic base / easy run
-      let duration = Math.round(40 * (w === 4 ? 0.8 : durationScale));
-      return {
-        name: "Rodagem de Base Regenerativa Z2",
-        intent: "aerobic_base",
-        durationMinutes: duration,
-        description: "Treino de rodagem leve clássico para acúmulo de quilometragem semanal e desenvolvimento capilar com baixo estresse articular.",
-        objective: "Construir base aeróbica e promover recuperação ativa sem acumular fadiga.",
-        observations: ["respiração confortável", "conversa normal e fluida", "FC sob controle em Zona 2"],
-        ifTired: "Reduza a duração para 30 minutos ou troque por trote regenerativo ultra leve.",
-        steps: [
-          {
-            name: "Aquecimento e Educativos",
-            durationSeconds: 600,
-            intensity: "Z1 Muito Leve",
-            description: "5 min de trote progressivo + 5 min de exercícios educativos de corrida (Dribbling e Soldadinho) para coordenação motora.",
-            stepType: "warmup"
-          },
-          {
-            name: "Rodagem Confortável",
-            durationSeconds: (duration - 15) * 60,
-            intensity: "Z2 Trote Leve / RPE 3-4",
-            description: "Ritmo conversável para desenvolvimento mitocondrial.",
-            stepType: "main_set"
-          },
-          {
-            name: "Desaquecimento",
-            durationSeconds: 300,
-            intensity: "Z1",
-            stepType: "cooldown"
-          }
-        ]
-      };
-    };
-
-    let strengthDay: string | null = null;
-    let nonRunningDays = weekdays.filter(d => d !== restDay && d !== longRunDay && !selectedTrainingDays.includes(d));
-    
-    if (nonRunningDays.length > 0) {
-      strengthDay = nonRunningDays[0];
-    } else {
-      const easyDays = selectedTrainingDays.filter((day) => {
-        const isQuality = selectedTrainingDays.indexOf(day) === Math.floor(selectedTrainingDays.length / 2);
-        return !isQuality;
-      });
-      if (easyDays.length > 0) {
-        strengthDay = easyDays[easyDays.length - 1];
-        selectedTrainingDays = selectedTrainingDays.filter(d => d !== strengthDay);
-      }
+      overviewObjective = "Reduzir o volume agudo de treino para permitir a supercompensação biológica e muscular.";
+      overviewKey = "Treinos regenerativos ultra leves";
+      overviewAttention = "Semana para descansar e assimilar os ganhos. Evite treinar forte.";
     }
 
     weekdays.forEach(day => {
-      if (day === restDay) {
+      const dayLower = day.toLowerCase();
+      const restLower = restDay.toLowerCase();
+      const isExplicitRest = dayLower.includes(restLower.slice(0, 3));
+      const isAvailable = availableDaysList.some(ad => ad.toLowerCase().includes(dayLower.slice(0, 3)));
+
+      const isRestDay = isExplicitRest || (!isAvailable && day !== longRunDay);
+
+      if (isRestDay) {
         workouts.push({
           day,
           workout: {
@@ -1523,86 +1376,243 @@ function generateLocalTrainingPlan(athleteProfile: any, dailyMetrics: any, train
           }
         });
       } else if (day === longRunDay) {
-        workouts.push({
-          day,
-          workout: getWorkoutForDay(day, true, false)
-        });
-      } else if (selectedTrainingDays.includes(day)) {
-        const isQuality = selectedTrainingDays.indexOf(day) === Math.floor(selectedTrainingDays.length / 2);
-        workouts.push({
-          day,
-          workout: getWorkoutForDay(day, false, isQuality)
-        });
-      } else if (day === strengthDay) {
-        workouts.push({
-          day,
-          workout: {
-            name: "Fortalecimento Funcional para Corrida",
-            intent: "strength",
-            durationMinutes: 35,
-            description: "Treino de fortalecimento e força funcional focado em estabilização do quadril, joelho e core para potência de passada e prevenção de lesões comuns da corrida.",
-            objective: "Fortalecer musculatura estabilizadora e prevenir lesões comuns na corrida.",
-            observations: ["execução lenta e controlada", "core sempre ativo", "foco no alinhamento do joelho"],
-            ifTired: "Faça apenas 2 séries de cada exercício com menos peso ou carga corporal.",
-            steps: [
-              {
-                name: "Mobilidade e Ativação",
-                durationSeconds: 300,
-                intensity: "Z0 Baixa",
-                description: "Exercícios de mobilidade articular de tornozelos, quadril e ativação de glúteo médio e transverso abdominal.",
-                stepType: "warmup"
-              },
-              {
-                name: "Fortalecimento de Membros Inferiores e Core (3x)",
-                durationSeconds: 1500,
-                intensity: "RPE 6-7 / Moderada",
-                description: "Agachamento búlgaro unilateral, elevação pélvica de uma perna, elevação de panturrilha na escada e prancha isométrica frontal e lateral.",
-                stepType: "main_set",
-                sets: 3,
-                repetitions: 12,
-                recoverySeconds: 60,
-                instruction: "Realize os exercícios focando no alinhamento articular. Não apresse a execução."
-              },
-              {
-                name: "Descompressão e Mobilidade Passiva",
-                durationSeconds: 300,
-                intensity: "Regenerativa",
-                description: "Alongamentos estáticos suaves de quadríceps, isquiotibiais e flexores de quadril.",
-                stepType: "cooldown"
-              }
-            ]
-          }
-        });
-      } else {
-        workouts.push({
-          day,
-          workout: {
-            name: "Mobilidade Articular e Core",
+        let duration = Math.round((goalType === "5k" ? 50 : goalType === "10k" ? 70 : goalType === "half_marathon" ? 95 : 60) * durationScale);
+        const mainWorkout = {
+          name: w === 4 ? "Longão de Descarga Z2" : "Longão Progressivo Z2",
+          intent: "long_run",
+          durationMinutes: isDoubleSession ? t1Min : duration,
+          description: "Mantenha um ritmo confortável em Zona 2. Foco em capacidade aeróbica prolongada e estabilidade de passada.",
+          objective: "Desenvolver resistência aeróbica e adaptação musculoesquelética de longa duração.",
+          observations: ["mantenha ritmo confortável", "conversa em frases completas", "foco em Zona 2"],
+          ifTired: "Reduza a duração em 15 minutos e termine caminhando se necessário.",
+          steps: [
+            {
+              name: "Aquecimento e Educativos de Corrida",
+              durationSeconds: 600,
+              intensity: "Z1 Leve",
+              description: "Trote leve e educativos de corrida (Skip Alto, Soldadinho) para coordenação.",
+              stepType: "warmup"
+            },
+            {
+              name: "Corrida Contínua de Endurance",
+              durationSeconds: Math.max(300, ((isDoubleSession ? t1Min : duration) - 15) * 60),
+              intensity: "Z2 Confortável",
+              description: `Ritmo constante visando adaptação de tendões e capilarização muscular. Pace Alvo: ~${pace}/km.`,
+              stepType: "main_set"
+            },
+            {
+              name: "Desaquecimento",
+              durationSeconds: 300,
+              intensity: "Z1 regenerativo",
+              description: "Caminhada lenta para baixar os batimentos cardíacos.",
+              stepType: "cooldown"
+            }
+          ]
+        };
+
+        const workoutObj: any = { day, workout: mainWorkout };
+
+        if (isDoubleSession) {
+          workoutObj.turno1 = { ...mainWorkout, name: `${mainWorkout.name} (Turno 1 - Manhã)` };
+          workoutObj.turno2 = {
+            name: "Mobilidade Articular & Soltura (Turno 2 - Tarde/Noite)",
             intent: "mobility",
-            durationMinutes: 25,
-            description: "Sessão dedicada à flexibilidade funcional, estabilização do quadril e fortalecimento do core para prevenir lesões na corrida.",
-            objective: "Melhorar a flexibilidade articular e estabilização postural.",
-            observations: ["movimentos amplos e controlados", "respiração fluida", "foco no alinhamento postural"],
-            ifTired: "Faça de forma mais passiva, segurando os alongamentos estáticos por mais tempo.",
+            durationMinutes: t2Min,
+            description: "Sessão dedicada à soltura de cadeias musculares posteriores, mobilidade de quadril e tornozelos após o treino longo de corrida.",
             steps: [
               {
-                name: "Soltura Miofascial e Mobilidade",
-                durationSeconds: 600,
-                intensity: "Z0 Baixa",
-                description: "Exercícios dinâmicos de alongamento ativo e soltura.",
-                stepType: "warmup"
-              },
-              {
-                name: "Fortalecimento de Core e Glúteos",
-                durationSeconds: 900,
-                intensity: "Z0 Baixa",
-                description: "Pranchas frontais, laterais e pontes unilaterais de glúteo.",
-                stepType: "main_set"
+                name: "Mobilidade e Recuperação Ativa",
+                durationSeconds: t2Min * 60,
+                intensity: "Baixa / Regenerativo",
+                description: "Alongamentos estáticos passivos e soltura miofascial de panturrilhas, isquiotibiais e quadríceps."
               }
             ]
-          }
-        });
+          };
+        }
+
+        workouts.push(workoutObj);
+      } else if (day === "Quarta-feira") {
+        // Quality interval session
+        let duration = Math.round(45 * (w === 4 ? 0.75 : durationScale));
+        const mainWorkout = {
+          name: "Intervalados de VO2 Máx (Tiros de 400m)",
+          intent: "vo2max",
+          durationMinutes: isDoubleSession ? t1Min : duration,
+          description: "Sessão de alta intensidade para expandir o teto de captação de oxigênio e tolerância ao lactato.",
+          objective: "Expandir o teto de captação de oxigênio (VO2 Máx) e velocidade de corrida.",
+          observations: ["esforço forte nos tiros", "manter a postura alta", "recuperação ativa no trote"],
+          ifTired: "Aumente o tempo de recuperação entre os tiros ou reduza 2 repetições.",
+          steps: [
+            {
+              name: "Aquecimento e Acelerações",
+              durationSeconds: 600,
+              intensity: "Z2 Progressivo",
+              description: "Trote leve + educativos + 2 acelerações curtas de 50m.",
+              stepType: "warmup"
+            },
+            {
+              name: "Tiros Rápidos de 400m",
+              durationSeconds: 90,
+              intensity: "Z5 Esforço Forte",
+              description: "Velocidade de tiro submáximo.",
+              stepType: "main_set",
+              repetitions: w === 1 ? 4 : w === 2 ? 6 : w === 3 ? 8 : 4,
+              recoverySeconds: 90,
+              instruction: "Foque na postura alta e passada rápida."
+            },
+            {
+              name: "Trote de Descompressão",
+              durationSeconds: 300,
+              intensity: "Z1 Regenerativo",
+              description: "Corrida leve para remoção de lactato.",
+              stepType: "cooldown"
+            }
+          ]
+        };
+
+        const workoutObj: any = { day, workout: mainWorkout };
+
+        if (isDoubleSession) {
+          workoutObj.turno1 = { ...mainWorkout, name: `${mainWorkout.name} (Turno 1 - Manhã)` };
+          workoutObj.turno2 = {
+            name: "Fortalecimento Estrutural & Core (Turno 2 - Tarde/Noite)",
+            intent: "strength",
+            durationMinutes: t2Min,
+            description: "Sessão complementar no segundo turno focada na estabilização de core, glúteo médio e prevenção de lesões na corrida.",
+            steps: [
+              {
+                name: "Fortalecimento de Estabilidade",
+                durationSeconds: t2Min * 60,
+                intensity: "Moderada / RPE 5-6",
+                description: "Pranchas frontais e laterais, ponte unilateral de glúteo e agachamento sumô."
+              }
+            ]
+          };
+        }
+
+        workouts.push(workoutObj);
+      } else if (day === "Sábado" || day === "Terça-feira") {
+        // Strength / Base combo
+        const mainWorkout = {
+          name: day === "Terça-feira" ? "Tempo Run de Limiar de Lactato" : "Fortalecimento Funcional para Corrida",
+          intent: day === "Terça-feira" ? "threshold" : "strength",
+          durationMinutes: isDoubleSession ? t1Min : 45,
+          description: day === "Terça-feira"
+            ? "Treino ritmado em Zona 4 para elevação do limiar anaeróbico e controle de ritmo."
+            : "Treino de força focado em cadeia posterior, quadríceps e core para potência de passada.",
+          objective: day === "Terça-feira" ? "Melhorar a velocidade sustentada." : "Prevenir lesões e fortalecer a musculatura.",
+          observations: ["manter alinhamento articular", "respiração controlada"],
+          steps: [
+            {
+              name: "Aquecimento e Ativação",
+              durationSeconds: 600,
+              intensity: "Moderada",
+              description: "Ativação de glúteos e mobilidade."
+            },
+            {
+              name: "Bloco Principal",
+              durationSeconds: Math.max(300, ((isDoubleSession ? t1Min : 45) - 15) * 60),
+              intensity: "Z3/Z4 Firme",
+              description: "Série técnica contínua."
+            },
+            {
+              name: "Alongamento Final",
+              durationSeconds: 300,
+              intensity: "Leve"
+            }
+          ]
+        };
+
+        const workoutObj: any = { day, workout: mainWorkout };
+
+        if (isDoubleSession) {
+          workoutObj.turno1 = { ...mainWorkout, name: `${mainWorkout.name} (Turno 1 - Manhã)` };
+          workoutObj.turno2 = {
+            name: day === "Terça-feira" ? "Fortalecimento Estrutural & Core (Turno 2 - Tarde/Noite)" : "Rodagem Regenerativa Z1 (Turno 2 - Tarde/Noite)",
+            intent: day === "Terça-feira" ? "strength" : "recovery",
+            durationMinutes: t2Min,
+            description: day === "Terça-feira"
+              ? "Fortalecimento do core e quadril no segundo turno."
+              : "Rodagem leve ou caminhada para recuperação ativa e aumento do fluxo sanguíneo.",
+            steps: [
+              {
+                name: "Sessão Complementar Turno 2",
+                durationSeconds: t2Min * 60,
+                intensity: "Leve / Regenerativa",
+                description: "Exercícios contínuos no segundo turno."
+              }
+            ]
+          };
+        }
+
+        workouts.push(workoutObj);
+      } else {
+        // Standard Base Aerobic run for remaining days (Segunda, Sexta)
+        const mainWorkout = {
+          name: "Rodagem de Base Aeróbica Z2",
+          intent: "aerobic_base",
+          durationMinutes: isDoubleSession ? t1Min : 40,
+          description: "Rodagem leve e conversável em Zona 2 para aumento de volume semanal e capilarização muscular sem fadiga excessiva.",
+          objective: "Desenvolver capacidade aeróbica e suporte mitocondrial.",
+          observations: ["ritmo conversável", "foco em Zona 2"],
+          steps: [
+            {
+              name: "Aquecimento Leve",
+              durationSeconds: 300,
+              intensity: "Z1 Leve"
+            },
+            {
+              name: "Rodagem Confortável",
+              durationSeconds: Math.max(300, ((isDoubleSession ? t1Min : 40) - 10) * 60),
+              intensity: "Z2 Confortável",
+              description: `Pace Alvo: ~${pace}/km.`
+            },
+            {
+              name: "Desaquecimento",
+              durationSeconds: 300,
+              intensity: "Z1"
+            }
+          ]
+        };
+
+        const workoutObj: any = { day, workout: mainWorkout };
+
+        if (isDoubleSession) {
+          workoutObj.turno1 = { ...mainWorkout, name: `${mainWorkout.name} (Turno 1 - Manhã)` };
+          workoutObj.turno2 = {
+            name: "Fortalecimento Estrutural & Core (Turno 2 - Tarde/Noite)",
+            intent: "strength",
+            durationMinutes: t2Min,
+            description: "Sessão do segundo turno focada no fortalecimento de tornozelos, panturrilhas, joelhos e core.",
+            steps: [
+              {
+                name: "Core e Fortalecimento Articular",
+                durationSeconds: t2Min * 60,
+                intensity: "Moderada",
+                description: "Pranchas, pontes, elevação de panturrilhas e estabilização de quadril."
+              }
+            ]
+          };
+        }
+
+        workouts.push(workoutObj);
       }
+    });
+
+    // Sort workouts chronologically from Segunda-feira to Domingo
+    const dayOrder = [
+      "segunda-feira",
+      "terça-feira",
+      "quarta-feira",
+      "quinta-feira",
+      "sexta-feira",
+      "sábado",
+      "domingo"
+    ];
+    workouts.sort((a, b) => {
+      const ia = dayOrder.findIndex(d => (a.day || "").toLowerCase().includes(d.slice(0, 3)));
+      const ib = dayOrder.findIndex(d => (b.day || "").toLowerCase().includes(d.slice(0, 3)));
+      return (ia >= 0 ? ia : 99) - (ib >= 0 ? ib : 99);
     });
 
     weeks.push({
@@ -1624,7 +1634,6 @@ function generateLocalTrainingPlan(athleteProfile: any, dailyMetrics: any, train
                    goalType === "10k" ? "Consolidação e Velocidade para 10km" :
                    goalType === "half_marathon" ? "Periodização para Meia Maratona (21k)" :
                    goalType === "marathon" ? "Resistência de Fadiga para Maratona (42k)" :
-                   goalType === "ultra" ? "Volume e Economia de Corrida para Ultramaratona" :
                    "Condicionamento Físico Geral e Longevidade";
 
   return {
@@ -1642,9 +1651,10 @@ function generateLocalTrainingPlan(athleteProfile: any, dailyMetrics: any, train
   };
 }
 
-// Helper to fill missing days of the week with default rest days so all 7 days are always populated
-function fillMissingDaysInPlan(plan: any) {
+// Helper to fill missing days of the week and enforce restDay / availableDays / double sessions rules
+function fillMissingDaysInPlan(plan: any, athleteProfile?: any) {
   if (!plan || !plan.cycles || !Array.isArray(plan.cycles)) return plan;
+
   const fullWeekDays = [
     "Segunda-feira",
     "Terça-feira",
@@ -1655,64 +1665,164 @@ function fillMissingDaysInPlan(plan: any) {
     "Domingo"
   ];
 
+  const restDay = (athleteProfile?.restDay || "Quinta-feira").toLowerCase().trim();
+  const availableDaysList: string[] = Array.isArray(athleteProfile?.availableDays) && athleteProfile.availableDays.length > 0
+    ? athleteProfile.availableDays
+    : [];
+
+  const isDoubleSession = Boolean(athleteProfile?.doubleSessionsAllowed || athleteProfile?.sessionsPerDay === 2);
+  const t1Min = athleteProfile?.turno1TimeMinutes || athleteProfile?.availableTimePerWorkout || 50;
+  const t2Min = athleteProfile?.turno2TimeMinutes || athleteProfile?.timePerShiftMinutes || 30;
+
   plan.cycles.forEach((cycle: any) => {
     if (cycle && Array.isArray(cycle.weeks)) {
       cycle.weeks.forEach((week: any) => {
         if (week && Array.isArray(week.workouts)) {
-          const existingDaysLower = week.workouts.map((w: any) => (w.day || "").toLowerCase().trim());
-          
-          fullWeekDays.forEach((day) => {
-            const dayLower = day.toLowerCase();
-            const exists = existingDaysLower.some((d: string) => 
-              d === dayLower || 
-              (dayLower.includes("seg") && d.includes("seg")) ||
-              (dayLower.includes("ter") && d.includes("ter")) ||
-              (dayLower.includes("qua") && d.includes("qua")) ||
-              (dayLower.includes("qui") && d.includes("qui")) ||
-              (dayLower.includes("sex") && d.includes("sex")) ||
-              (dayLower.includes("sáb") && (d.includes("sáb") || d.includes("sab"))) ||
-              (dayLower.includes("dom") && d.includes("dom"))
-            );
-
-            if (!exists) {
-              week.workouts.push({
-                day,
-                workout: {
-                  name: "Descanso Total Fisiológico",
-                  intent: "rest",
-                  durationMinutes: 0,
-                  description: "Dia de recuperação passiva, assimilação de adaptações físicas e regeneração.",
-                  objective: "Permitir a supercompensação muscular e a regeneração do sistema nervoso central.",
-                  observations: ["Zero corrida", "Sono de qualidade", "Hidratação abundante"],
-                  ifTired: "Aproveite para realizar banho morno e alongamentos muito leves.",
-                  steps: [
-                    {
-                      name: "Folga Completa",
-                      durationSeconds: 0,
-                      intensity: "Nenhuma",
-                      description: "Foque em hidratação, alimentação equilibrada e descanso."
-                    }
-                  ]
-                }
-              });
+          // Normalize day names to full Portuguese
+          week.workouts.forEach((sw: any) => {
+            if (sw && sw.day) {
+              const dl = sw.day.toLowerCase().trim();
+              if (dl.includes("seg") || dl.includes("mon")) sw.day = "Segunda-feira";
+              else if (dl.includes("ter") || dl.includes("tue")) sw.day = "Terça-feira";
+              else if (dl.includes("qua") || dl.includes("wed")) sw.day = "Quarta-feira";
+              else if (dl.includes("qui") || dl.includes("thu")) sw.day = "Quinta-feira";
+              else if (dl.includes("sex") || dl.includes("fri")) sw.day = "Sexta-feira";
+              else if (dl.includes("sáb") || dl.includes("sab") || dl.includes("sat")) sw.day = "Sábado";
+              else if (dl.includes("dom") || dl.includes("sun")) sw.day = "Domingo";
             }
           });
 
+          const existingDays = week.workouts.map((w: any) => (w.day || "").toLowerCase().trim());
+
+          fullWeekDays.forEach((day) => {
+            const dayLower = day.toLowerCase();
+            const exists = existingDays.some((d: string) => d.includes(dayLower.slice(0, 3)));
+
+            if (!exists) {
+              const isExplicitRest = dayLower.includes(restDay.slice(0, 3));
+              const isAvailable = availableDaysList.length === 0 || availableDaysList.some(ad => ad.toLowerCase().includes(dayLower.slice(0, 3)));
+
+              if (isExplicitRest || !isAvailable) {
+                week.workouts.push({
+                  day,
+                  workout: {
+                    name: "Descanso Total Fisiológico",
+                    intent: "rest",
+                    durationMinutes: 0,
+                    description: "Dia de recuperação passiva, assimilação de adaptações físicas e regeneração.",
+                    objective: "Permitir a supercompensação muscular e a regeneração do sistema nervoso central.",
+                    observations: ["Zero corrida", "Sono de qualidade", "Hidratação abundante"],
+                    ifTired: "Aproveite para realizar banho morno e alongamentos muito leves.",
+                    steps: [
+                      {
+                        name: "Folga Completa",
+                        durationSeconds: 0,
+                        intensity: "Nenhuma",
+                        description: "Foque em hidratação, alimentação equilibrada e descanso."
+                      }
+                    ]
+                  }
+                });
+              } else {
+                // Active day was missing: add a proper workout
+                const isLongRun = dayLower.includes("dom");
+                const isQuality = dayLower.includes("qua");
+                
+                const mainWk = {
+                  name: isLongRun ? "Longão Progressivo Z2" : isQuality ? "Intervalados de VO2 Máx" : "Rodagem de Base Aeróbica Z2",
+                  intent: isLongRun ? "long_run" : isQuality ? "vo2max" : "aerobic_base",
+                  durationMinutes: t1Min,
+                  description: isLongRun 
+                    ? "Corrida de longa duração em Zona 2 para resistência aeróbica."
+                    : isQuality 
+                    ? "Sessão de tiros para desenvolvimento da capacidade cardiorrespiratória."
+                    : "Rodagem leve conversável em Zona 2.",
+                  steps: [
+                    {
+                      name: "Aquecimento",
+                      durationSeconds: 300,
+                      intensity: "Z1 Leve"
+                    },
+                    {
+                      name: "Bloco Principal",
+                      durationSeconds: Math.max(300, (t1Min - 10) * 60),
+                      intensity: isQuality ? "Z4/Z5 Fortes" : "Z2 Confortável",
+                      description: "Manter ritmo estável."
+                    },
+                    {
+                      name: "Desaquecimento",
+                      durationSeconds: 300,
+                      intensity: "Z1"
+                    }
+                  ]
+                };
+
+                const newWorkoutObj: any = { day, workout: mainWk };
+
+                if (isDoubleSession) {
+                  newWorkoutObj.turno1 = { ...mainWk, name: `${mainWk.name} (Turno 1 - Manhã)` };
+                  newWorkoutObj.turno2 = {
+                    name: "Fortalecimento Estrutural & Core (Turno 2 - Tarde/Noite)",
+                    intent: "strength",
+                    durationMinutes: t2Min,
+                    description: "Sessão no segundo turno para estabilização de quadril, joelho e fortalecimento de core.",
+                    steps: [
+                      {
+                        name: "Fortalecimento de Core e Glúteos",
+                        durationSeconds: t2Min * 60,
+                        intensity: "Moderada",
+                        description: "Pranchas, pontes e agachamentos isométricos."
+                      }
+                    ]
+                  };
+                }
+
+                week.workouts.push(newWorkoutObj);
+              }
+            }
+          });
+
+          // Ensure double sessions (turno1 and turno2) exist for all active training days if configured
+          if (isDoubleSession) {
+            week.workouts.forEach((sw: any) => {
+              if (sw.workout && sw.workout.intent !== "rest") {
+                if (!sw.turno1) {
+                  sw.turno1 = { ...sw.workout, name: `${sw.workout.name} (Turno 1 - Manhã)` };
+                }
+                if (!sw.turno2) {
+                  sw.turno2 = {
+                    name: sw.workout.intent === "strength" ? "Mobilidade Articular & Soltura (Turno 2 - Tarde/Noite)" : "Fortalecimento Estrutural & Core (Turno 2 - Tarde/Noite)",
+                    intent: sw.workout.intent === "strength" ? "mobility" : "strength",
+                    durationMinutes: t2Min,
+                    description: "Sessão no segundo turno para estabilidade de quadril, joelho e core.",
+                    steps: [
+                      {
+                        name: "Sessão Turno 2 (Tarde/Noite)",
+                        durationSeconds: t2Min * 60,
+                        intensity: "Moderada / Regenerativa",
+                        description: "Exercícios de fortalecimento e mobilidade articular."
+                      }
+                    ]
+                  };
+                }
+              }
+            });
+          }
+
           // Sort workouts chronologically from Segunda-feira to Domingo
+          const dayOrder = [
+            "segunda-feira",
+            "terça-feira",
+            "quarta-feira",
+            "quinta-feira",
+            "sexta-feira",
+            "sábado",
+            "domingo"
+          ];
           week.workouts.sort((a: any, b: any) => {
-            const getIndex = (dName: string) => {
-              if (!dName) return 99;
-              const dl = dName.toLowerCase();
-              if (dl.includes("seg") || dl.includes("mon")) return 0;
-              if (dl.includes("ter") || dl.includes("tue")) return 1;
-              if (dl.includes("qua") || dl.includes("wed")) return 2;
-              if (dl.includes("qui") || dl.includes("thu")) return 3;
-              if (dl.includes("sex") || dl.includes("fri")) return 4;
-              if (dl.includes("sáb") || dl.includes("sab") || dl.includes("sat")) return 5;
-              if (dl.includes("dom") || dl.includes("sun")) return 6;
-              return 99;
-            };
-            return getIndex(a.day) - getIndex(b.day);
+            const ia = dayOrder.findIndex(d => (a.day || "").toLowerCase().includes(d.slice(0, 3)));
+            const ib = dayOrder.findIndex(d => (b.day || "").toLowerCase().includes(d.slice(0, 3)));
+            return (ia >= 0 ? ia : 99) - (ib >= 0 ? ib : 99);
           });
         }
       });
@@ -1828,6 +1938,14 @@ O TREINADOR DEVE ADAPTAR TODO O SEU COMPORTAMENTO (NÃO APENAS O TEXTO) COM BASE
 
 3. CAMADA 3 — RESTRIÇÕES E VIABILIDADE ("O QUE É POSSÍVEL?"):
    - Duração da Sessão: Respeite rigorosamente a limitação de tempo do atleta (availableTimePerWorkout).
+   - REGRAS CRÍTICAS DE COBERTURA DE DIAS E DIA DE DESCANSO:
+     * Você DEVE fornecer prescrições para TODOS os 7 dias da semana ("Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo").
+     * Dias Disponíveis Informados: ${Array.isArray(athleteProfile?.availableDays) && athleteProfile.availableDays.length > 0 ? athleteProfile.availableDays.join(", ") : "6 dias por semana"}.
+     * Dia de Descanso Configurado: "${athleteProfile?.restDay || "Quinta-feira"}".
+     * O ÚNICO DIA DE DESCANSO ("intent": "rest") DEVE SER "${athleteProfile?.restDay || "Quinta-feira"}". TODOS OS OUTROS DIAS DISPONÍVEIS SÃO DIAS DE TREINO ATIVO! NUNCA preencha os dias disponíveis com descanso passivo.
+   - REGRAS CRÍTICAS DE 2 TURNOS (TURNO DUPLO):
+     * Status de Turno Duplo: ${athleteProfile?.doubleSessionsAllowed || athleteProfile?.sessionsPerDay === 2 ? "ATIVADO (2 Sessões por dia: Manhã e Tarde/Noite)" : "Desativado (1 Sessão por dia)"}.
+     * Quando ativado, garanta que os dias ativos tenham prescrição no Turno 1 (Manhã - Corrida/Cardio) e Turno 2 (Tarde/Noite - Fortalecimento/Core/Mobilidade).
    - Terreno e Infraestrutura:
      * Sem Pista de Atletismo: Prescreva tiros por tempo (ex: 6x 3min Z4).
      * Com Pista de Atletismo: Prescreva tiros por distância (ex: 10x 400m Z4).
@@ -1985,7 +2103,7 @@ Return ONLY this JSON, with no other text, comments, markdown blocks, or surroun
     const responseText = response.text;
     if (responseText) {
       let trainingPlan = JSON.parse(responseText.trim());
-      trainingPlan = fillMissingDaysInPlan(trainingPlan);
+      trainingPlan = fillMissingDaysInPlan(trainingPlan, athleteProfile);
       return res.json({ success: true, trainingPlan });
     } else {
       throw new Error("Empty response from AI engine");
@@ -1994,7 +2112,7 @@ Return ONLY this JSON, with no other text, comments, markdown blocks, or surroun
     console.warn("Generate training plan falling back to local generator.");
     try {
       let localPlan = generateLocalTrainingPlan(req.body.athleteProfile, req.body.dailyMetrics, req.body.trainingHistory, req.body.readiness);
-      localPlan = fillMissingDaysInPlan(localPlan);
+      localPlan = fillMissingDaysInPlan(localPlan, req.body.athleteProfile);
       (localPlan as any).isFallback = true;
       return res.json({ success: true, trainingPlan: localPlan, isFallback: true });
     } catch (fallbackError: any) {
