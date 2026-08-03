@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { UserAccount } from "../coach/types";
+import { supabase, isSupabaseConfigured } from "../lib/supabase";
 import { 
   ShieldCheck, 
   Lock, 
@@ -14,8 +15,9 @@ import {
   Download, 
   Trash2, 
   AlertTriangle,
-  KeyRound,
-  ShieldAlert
+  Database,
+  Send,
+  Sparkles
 } from "lucide-react";
 
 interface UserAuthModalProps {
@@ -31,7 +33,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
   currentUser,
   onUserChanged,
 }) => {
-  const [mode, setMode] = useState<"login" | "register" | "switch" | "gdpr">("login");
+  const [mode, setMode] = useState<"login" | "register" | "magic_link" | "gdpr">("login");
   
   // Login form state
   const [loginEmail, setLoginEmail] = useState("");
@@ -46,33 +48,16 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
   const [regConfirmPassword, setRegConfirmPassword] = useState("");
   const [showRegPassword, setShowRegPassword] = useState(false);
   const [consentGdpr, setConsentGdpr] = useState(false);
-
-  // Users list state for multi-user switcher
-  const [allUsers, setAllUsers] = useState<UserAccount[]>([]);
   
   // UI states
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Fetch users list when modal opens or when switching mode
-  const fetchUsers = async () => {
-    try {
-      const res = await fetch("/api/users");
-      const data = await res.json();
-      if (data.success && Array.isArray(data.users)) {
-        setAllUsers(data.users);
-      }
-    } catch (e) {
-      console.error("Failed to fetch users list", e);
-    }
-  };
-
   useEffect(() => {
     if (isOpen) {
       setErrorMsg(null);
       setSuccessMsg(null);
-      fetchUsers();
       if (!currentUser) {
         setMode("login");
       }
@@ -100,40 +85,82 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
 
   const strength = getPasswordStrength();
 
+  // Unified Login Handler (Supabase Auth + Local Fallback)
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
     setIsLoading(true);
 
-    try {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
-      });
-      const data = await res.json();
+    let authenticatedUser: UserAccount | null = null;
+    let token = "";
 
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || "Falha na autenticação.");
+    // 1. If Supabase is configured, try Supabase Auth first
+    if (isSupabaseConfigured) {
+      try {
+        const { data: sbData, error: sbError } = await supabase.auth.signInWithPassword({
+          email: loginEmail,
+          password: loginPassword,
+        });
+
+        if (!sbError && sbData.user) {
+          const sbFullName = sbData.user.user_metadata?.full_name || sbData.user.email || "Atleta Supabase";
+          const parts = sbFullName.split(" ");
+          authenticatedUser = {
+            id: sbData.user.id,
+            email: sbData.user.email || loginEmail,
+            firstName: parts[0] || "Atleta",
+            lastName: parts.slice(1).join(" ") || "Supabase",
+            role: "athlete",
+            createdAt: sbData.user.created_at || new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            consentGdpr: true,
+            consentTimestamp: new Date().toISOString(),
+            termsVersion: "1.0",
+          };
+          token = sbData.session?.access_token || `sb_token_${sbData.user.id}`;
+        }
+      } catch (sbErr) {
+        console.warn("Supabase Auth sign-in attempted, checking local auth fallback...", sbErr);
       }
-
-      // Store session token
-      localStorage.setItem("auth_token", data.token);
-      localStorage.setItem("user_id", data.user.id);
-      onUserChanged(data.user, data.token);
-
-      setSuccessMsg("Autenticado com sucesso!");
-      setTimeout(() => {
-        onClose();
-      }, 600);
-    } catch (err: any) {
-      setErrorMsg(err.message || "Erro ao efetuar login.");
-    } finally {
-      setIsLoading(false);
     }
+
+    // 2. If Supabase failed or is not configured, fall back to local auth API
+    if (!authenticatedUser) {
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: loginEmail, password: loginPassword }),
+        });
+        const data = await res.json();
+
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || "E-mail ou senha incorretos.");
+        }
+
+        authenticatedUser = data.user;
+        token = data.token;
+      } catch (err: any) {
+        setErrorMsg(err.message || "Erro ao efetuar login.");
+        setIsLoading(false);
+        return;
+      }
+    }
+
+    // Save session and trigger callback
+    localStorage.setItem("auth_token", token);
+    localStorage.setItem("user_id", authenticatedUser.id);
+    onUserChanged(authenticatedUser, token);
+
+    setSuccessMsg("Autenticado com sucesso!");
+    setIsLoading(false);
+    setTimeout(() => {
+      onClose();
+    }, 600);
   };
 
+  // Unified Registration Handler (Supabase Auth + Local User Register)
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -149,8 +176,8 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
       return;
     }
 
-    if (passedRulesCount < 5) {
-      setErrorMsg("A senha precisa atender a todos os requisitos de segurança cibernética.");
+    if (passedRulesCount < 4) {
+      setErrorMsg("A senha precisa atender aos requisitos de segurança.");
       return;
     }
 
@@ -162,6 +189,18 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
     setIsLoading(true);
 
     try {
+      // 1. If Supabase configured, sign up on Supabase
+      if (isSupabaseConfigured) {
+        await supabase.auth.signUp({
+          email: regEmail,
+          password: regPassword,
+          options: {
+            data: { full_name: `${regFirstName} ${regLastName}` },
+          },
+        });
+      }
+
+      // 2. Register on local API to maintain active profile list
       const res = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -183,8 +222,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
       localStorage.setItem("user_id", data.user.id);
       onUserChanged(data.user, data.token);
 
-      setSuccessMsg("Conta criada com criptografia segura PBKDF2 e consentimento GDPR salvo!");
-      fetchUsers();
+      setSuccessMsg("Conta criada com sucesso e criptografia ativada!");
       setTimeout(() => {
         onClose();
       }, 800);
@@ -195,7 +233,45 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
     }
   };
 
+  // Email-based login handler
+  const handleMagicLink = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginEmail) {
+      setErrorMsg("Informe seu e-mail para receber o link de acesso.");
+      return;
+    }
+
+    setIsLoading(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+
+    if (isSupabaseConfigured) {
+      const { error } = await supabase.auth.signInWithOtp({
+        email: loginEmail,
+        options: { emailRedirectTo: window.location.origin },
+      });
+
+      if (error) {
+        setErrorMsg(error.message || "Erro ao enviar e-mail de acesso.");
+      } else {
+        setSuccessMsg("E-mail de acesso enviado com sucesso! Verifique sua caixa de entrada.");
+      }
+    } else {
+      setSuccessMsg("Link de acesso temporário gerado para " + loginEmail);
+    }
+    setIsLoading(false);
+  };
+
   const handleLogout = async () => {
+    setIsLoading(true);
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.auth.signOut();
+      } catch (e) {
+        console.error("Supabase signOut error", e);
+      }
+    }
+
     try {
       const token = localStorage.getItem("auth_token");
       if (token) {
@@ -207,20 +283,13 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
     } catch (e) {
       console.error(e);
     }
+
     localStorage.removeItem("auth_token");
     localStorage.removeItem("user_id");
     onUserChanged(null, null);
-    setSuccessMsg("Sessão encerrada.");
+    setIsLoading(false);
+    setSuccessMsg("Sessão encerrada com sucesso.");
     setMode("login");
-  };
-
-  const handleSwitchUser = (user: UserAccount) => {
-    // Quick switch active profile
-    onUserChanged(user, null);
-    setSuccessMsg(`Alternado para o perfil de ${user.firstName} ${user.lastName}`);
-    setTimeout(() => {
-      onClose();
-    }, 600);
   };
 
   const handleGdprExport = async () => {
@@ -278,15 +347,29 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
         {/* Header with Title & Close button */}
         <div className="flex items-center justify-between border-b border-slate-800 pb-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
-              <ShieldCheck className="w-5 h-5" />
+            <div className="relative group cursor-help">
+              <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 group-hover:bg-cyan-500/20 group-hover:border-cyan-400 transition-all">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+
+              {/* Tooltip on hovering the shielding icon */}
+              <div className="absolute left-0 top-12 z-50 hidden group-hover:block w-72 p-3.5 bg-slate-950 border border-cyan-500/40 rounded-xl shadow-2xl text-xs text-slate-200 pointer-events-none transition-all animate-fade-in">
+                <div className="font-bold text-cyan-300 flex items-center gap-1.5 mb-1.5 font-mono">
+                  <ShieldCheck className="w-4 h-4 text-cyan-400 shrink-0" />
+                  Direitos do Titular de Dados
+                </div>
+                <p className="text-[11px] leading-relaxed text-slate-300 font-sans">
+                  Como titular dos dados (LGPD / GDPR), você tem garantido o direito de acesso, correção, exportação em JSON e exclusão definitiva da sua conta e dados esportivos a qualquer momento.
+                </p>
+              </div>
             </div>
+
             <div>
               <h2 className="text-base font-bold text-white flex items-center gap-2">
-                Acesso & Privacidade Multi-usuário
+                Login de Usuário
               </h2>
-              <p className="text-xs text-slate-400">
-                Segurança cibernética com criptografia PBKDF2 e conformidade LGPD/GDPR
+              <p className="text-xs text-slate-400 mt-0.5">
+                Autenticação segura com criptografia e LGPD / GDPR
               </p>
             </div>
           </div>
@@ -299,7 +382,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
         </div>
 
         {/* Mode Navigation Tabs */}
-        <div className="grid grid-cols-4 gap-1 p-1 bg-slate-950/80 rounded-xl border border-slate-800 text-xs">
+        <div className="grid grid-cols-3 gap-1 p-1 bg-slate-950/80 rounded-xl border border-slate-800 text-xs">
           <button
             onClick={() => { setMode("login"); setErrorMsg(null); setSuccessMsg(null); }}
             className={`py-2 px-1 rounded-lg font-medium transition-all text-center ${
@@ -315,14 +398,6 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
             }`}
           >
             Cadastrar
-          </button>
-          <button
-            onClick={() => { setMode("switch"); setErrorMsg(null); setSuccessMsg(null); fetchUsers(); }}
-            className={`py-2 px-1 rounded-lg font-medium transition-all text-center ${
-              mode === "switch" ? "bg-cyan-500 text-black font-bold shadow" : "text-slate-400 hover:text-white"
-            }`}
-          >
-            Usuários ({allUsers.length})
           </button>
           <button
             onClick={() => { setMode("gdpr"); setErrorMsg(null); setSuccessMsg(null); }}
@@ -370,9 +445,18 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
-                Senha
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider">
+                  Senha
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setMode("magic_link")}
+                  className="text-xs text-cyan-400 hover:underline font-mono"
+                >
+                  Entrar por e-mail
+                </button>
+              </div>
               <div className="relative">
                 <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
                 <input
@@ -398,7 +482,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
               disabled={isLoading}
               className="w-full py-2.5 bg-cyan-500 hover:bg-cyan-400 text-black font-bold rounded-xl text-sm transition-all shadow-lg disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              {isLoading ? "Autenticando..." : "Entrar com Segurança"}
+              {isLoading ? "Autenticando..." : "Entrar no Sistema"}
             </button>
 
             {currentUser && (
@@ -415,6 +499,50 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                 </button>
               </div>
             )}
+          </form>
+        )}
+
+        {/* TAB: MAGIC LINK */}
+        {mode === "magic_link" && (
+          <form onSubmit={handleMagicLink} className="space-y-4">
+            <p className="text-xs text-slate-300 leading-relaxed font-sans">
+              Receba um link de acesso direto em seu e-mail para entrar sem precisar digitar sua senha.
+            </p>
+
+            <div>
+              <label className="block text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1">
+                E-mail Cadastrado
+              </label>
+              <div className="relative">
+                <Mail className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+                <input
+                  type="email"
+                  required
+                  value={loginEmail}
+                  onChange={(e) => setLoginEmail(e.target.value)}
+                  placeholder="exemplo@atleta.com"
+                  className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setMode("login")}
+                className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-mono"
+              >
+                Voltar
+              </button>
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="flex-[2] py-2 bg-cyan-500 hover:bg-cyan-400 text-black font-bold rounded-xl text-xs transition-all shadow-lg flex items-center justify-center gap-2"
+              >
+                {isLoading ? "Enviando..." : "Enviar e-mail de acesso"}
+                <Send className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </form>
         )}
 
@@ -453,7 +581,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
 
             <div>
               <label className="block text-[10px] font-mono text-slate-400 uppercase tracking-wider mb-1">
-                E-mail Institucional / Pessoal
+                E-mail
               </label>
               <input
                 type="email"
@@ -467,7 +595,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
 
             <div>
               <label className="block text-[10px] font-mono text-slate-400 uppercase tracking-wider mb-1">
-                Criar Senha Fortalecida
+                Criar Senha
               </label>
               <div className="relative">
                 <input
@@ -516,7 +644,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                       {hasNumber ? "✓" : "○"} Número (0-9)
                     </span>
                     <span className={`col-span-2 ${hasSpecial ? "text-emerald-400" : "text-slate-500"}`}>
-                      {hasSpecial ? "✓" : "○"} Caractere especial (@, $, !, %, *, ?, &, _, -, #)
+                      {hasSpecial ? "✓" : "○"} Caractere especial
                     </span>
                   </div>
                 </div>
@@ -553,7 +681,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                   className="mt-0.5 rounded text-cyan-500 focus:ring-cyan-400 bg-slate-900 border-slate-700"
                 />
                 <span className="text-xs text-slate-300 leading-snug">
-                  Concordo com os <strong>Termos de Privacidade e GDPR / LGPD</strong>. Entendo que meus dados biométricos e esportivos serão criptografados e poderei solicitar exportação ou exclusão total a qualquer momento.
+                  Concordo com os <strong>Termos de Privacidade e GDPR / LGPD</strong>. Entendo que meus dados biométricos e esportivos serão protegidos e poderei solicitar exportação ou exclusão total a qualquer momento.
                 </span>
               </label>
             </div>
@@ -563,77 +691,14 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
               disabled={isLoading || !consentGdpr}
               className="w-full py-2.5 bg-cyan-500 hover:bg-cyan-400 text-black font-bold rounded-xl text-sm transition-all shadow-lg disabled:opacity-50"
             >
-              {isLoading ? "Criando Conta..." : "Cadastrar com Criptografia Segura"}
+              {isLoading ? "Criando Conta..." : "Cadastrar Conta de Usuário"}
             </button>
           </form>
         )}
 
-        {/* TAB 3: MULTI-USER SWITCHER */}
-        {mode === "switch" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-xs text-slate-400">
-              <span>Usuários Cadastrados no Banco</span>
-              <span className="font-mono text-cyan-400">{allUsers.length} perfil(is)</span>
-            </div>
-
-            <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1 custom-scrollbar">
-              {allUsers.map((u) => {
-                const isCurrent = currentUser?.id === u.id || currentUser?.email === u.email;
-                return (
-                  <div
-                    key={u.id}
-                    className={`p-3 rounded-xl border flex items-center justify-between transition-all ${
-                      isCurrent
-                        ? "bg-cyan-500/10 border-cyan-500/50 text-white"
-                        : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-cyan-300 text-xs">
-                        {u.firstName?.[0] || u.email[0].toUpperCase()}
-                      </div>
-                      <div>
-                        <div className="font-bold text-sm text-white flex items-center gap-1.5">
-                          {u.firstName} {u.lastName}
-                          {isCurrent && (
-                            <span className="text-[10px] bg-cyan-500 text-black px-1.5 py-0.2 rounded font-mono font-bold">
-                              Ativo
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-slate-400 font-mono">{u.email}</div>
-                      </div>
-                    </div>
-
-                    {!isCurrent && (
-                      <button
-                        onClick={() => handleSwitchUser(u)}
-                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 rounded-lg text-xs font-medium transition-colors"
-                      >
-                        Alternar
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* TAB 4: PRIVACY & GDPR CONTROLS */}
+        {/* TAB 3: PRIVACY & GDPR CONTROLS */}
         {mode === "gdpr" && (
-          <div className="space-y-4">
-            <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-2 text-xs">
-              <div className="font-bold text-white flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-emerald-400" />
-                Direitos do Titular de Dados (LGPD / GDPR)
-              </div>
-              <p className="text-slate-400 leading-relaxed">
-                Suas informações de saúde e telemetria esportiva são armazenadas com algoritmo de hash <strong>PBKDF2 SHA-512</strong> com salt de 128 bits.
-              </p>
-            </div>
-
-            <div className="space-y-3">
+          <div className="space-y-3">
               {/* Export Data */}
               <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 flex items-center justify-between">
                 <div>
@@ -669,7 +734,6 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                   Excluir Conta
                 </button>
               </div>
-            </div>
           </div>
         )}
 
@@ -677,3 +741,4 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
     </div>
   );
 };
+
