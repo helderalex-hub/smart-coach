@@ -1642,6 +1642,86 @@ function generateLocalTrainingPlan(athleteProfile: any, dailyMetrics: any, train
   };
 }
 
+// Helper to fill missing days of the week with default rest days so all 7 days are always populated
+function fillMissingDaysInPlan(plan: any) {
+  if (!plan || !plan.cycles || !Array.isArray(plan.cycles)) return plan;
+  const fullWeekDays = [
+    "Segunda-feira",
+    "Terça-feira",
+    "Quarta-feira",
+    "Quinta-feira",
+    "Sexta-feira",
+    "Sábado",
+    "Domingo"
+  ];
+
+  plan.cycles.forEach((cycle: any) => {
+    if (cycle && Array.isArray(cycle.weeks)) {
+      cycle.weeks.forEach((week: any) => {
+        if (week && Array.isArray(week.workouts)) {
+          const existingDaysLower = week.workouts.map((w: any) => (w.day || "").toLowerCase().trim());
+          
+          fullWeekDays.forEach((day) => {
+            const dayLower = day.toLowerCase();
+            const exists = existingDaysLower.some((d: string) => 
+              d === dayLower || 
+              (dayLower.includes("seg") && d.includes("seg")) ||
+              (dayLower.includes("ter") && d.includes("ter")) ||
+              (dayLower.includes("qua") && d.includes("qua")) ||
+              (dayLower.includes("qui") && d.includes("qui")) ||
+              (dayLower.includes("sex") && d.includes("sex")) ||
+              (dayLower.includes("sáb") && (d.includes("sáb") || d.includes("sab"))) ||
+              (dayLower.includes("dom") && d.includes("dom"))
+            );
+
+            if (!exists) {
+              week.workouts.push({
+                day,
+                workout: {
+                  name: "Descanso Total Fisiológico",
+                  intent: "rest",
+                  durationMinutes: 0,
+                  description: "Dia de recuperação passiva, assimilação de adaptações físicas e regeneração.",
+                  objective: "Permitir a supercompensação muscular e a regeneração do sistema nervoso central.",
+                  observations: ["Zero corrida", "Sono de qualidade", "Hidratação abundante"],
+                  ifTired: "Aproveite para realizar banho morno e alongamentos muito leves.",
+                  steps: [
+                    {
+                      name: "Folga Completa",
+                      durationSeconds: 0,
+                      intensity: "Nenhuma",
+                      description: "Foque em hidratação, alimentação equilibrada e descanso."
+                    }
+                  ]
+                }
+              });
+            }
+          });
+
+          // Sort workouts chronologically from Segunda-feira to Domingo
+          week.workouts.sort((a: any, b: any) => {
+            const getIndex = (dName: string) => {
+              if (!dName) return 99;
+              const dl = dName.toLowerCase();
+              if (dl.includes("seg") || dl.includes("mon")) return 0;
+              if (dl.includes("ter") || dl.includes("tue")) return 1;
+              if (dl.includes("qua") || dl.includes("wed")) return 2;
+              if (dl.includes("qui") || dl.includes("thu")) return 3;
+              if (dl.includes("sex") || dl.includes("fri")) return 4;
+              if (dl.includes("sáb") || dl.includes("sab") || dl.includes("sat")) return 5;
+              if (dl.includes("dom") || dl.includes("sun")) return 6;
+              return 99;
+            };
+            return getIndex(a.day) - getIndex(b.day);
+          });
+        }
+      });
+    }
+  });
+
+  return plan;
+}
+
 // Endpoint to generate a fully customized Training Plan based on Coach Context and Athlete Profile
 app.post("/api/generate-training-plan", async (req, res): Promise<any> => {
   try {
@@ -1904,7 +1984,8 @@ Return ONLY this JSON, with no other text, comments, markdown blocks, or surroun
 
     const responseText = response.text;
     if (responseText) {
-      const trainingPlan = JSON.parse(responseText.trim());
+      let trainingPlan = JSON.parse(responseText.trim());
+      trainingPlan = fillMissingDaysInPlan(trainingPlan);
       return res.json({ success: true, trainingPlan });
     } else {
       throw new Error("Empty response from AI engine");
@@ -1912,7 +1993,8 @@ Return ONLY this JSON, with no other text, comments, markdown blocks, or surroun
   } catch (error: any) {
     console.warn("Generate training plan falling back to local generator.");
     try {
-      const localPlan = generateLocalTrainingPlan(req.body.athleteProfile, req.body.dailyMetrics, req.body.trainingHistory, req.body.readiness);
+      let localPlan = generateLocalTrainingPlan(req.body.athleteProfile, req.body.dailyMetrics, req.body.trainingHistory, req.body.readiness);
+      localPlan = fillMissingDaysInPlan(localPlan);
       (localPlan as any).isFallback = true;
       return res.json({ success: true, trainingPlan: localPlan, isFallback: true });
     } catch (fallbackError: any) {
